@@ -21,4 +21,7 @@ pub fn main() !void {
     result = s.call(.{ 0, @intFromPtr(&new_buf), storage, @intFromPtr(&storage) });
 
     std.debug.print("Syscall returned: {x}\n", .{result});
+
+    std.debug.print("Reprotecting ntdll\n");
+    win;
 }

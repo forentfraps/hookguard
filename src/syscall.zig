@@ -27,7 +27,7 @@ pub const syscall = struct {
     }
 
     pub fn fetch(func_ptr: [*]u8) !Self {
-        //4C 8B D1 B8
+        //4C 8B D1 B8 ?? ??
 
         const magic: u32 = 0xB8D18B4C;
         const magic_ptr: *u32 = @alignCast(@ptrCast(func_ptr));
