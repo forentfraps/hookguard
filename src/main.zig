@@ -2,6 +2,7 @@ const std = @import("std");
 const syscall_lib = @import("syscall.zig");
 const winc = @import("Windows.h.zig");
 const win = std.os.windows;
+const warden_lib = @import("warden.zig");
 
 const syscall = syscall_lib.syscall;
 const W = std.unicode.utf8ToUtf16LeStringLiteral;
@@ -22,6 +23,8 @@ pub fn main() !void {
 
     std.debug.print("Syscall returned: {x}\n", .{result});
 
-    std.debug.print("Reprotecting ntdll\n");
-    win;
+    // std.debug.print("Reprotecting ntdll\n");
+    var w = warden_lib.warden{ .allocator = std.heap.page_allocator };
+    try w.enumerate_memory();
+    try w.enumerate_modules();
 }
