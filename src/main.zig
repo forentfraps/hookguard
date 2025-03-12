@@ -27,4 +27,5 @@ pub fn main() !void {
     var w = warden_lib.warden{ .allocator = std.heap.page_allocator };
     try w.enumerate_memory();
     try w.enumerate_modules();
+    try w.load_initial_exe();
 }
