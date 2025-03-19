@@ -2,7 +2,7 @@ const std = @import("std");
 const syscall_lib = @import("syscall.zig");
 const winc = @import("Windows.h.zig");
 const win = std.os.windows;
-const state_manager = @import("state_maganer.zig");
+const state_manager = @import("state_manager.zig");
 
 const syscall = syscall_lib.syscall;
 const W = std.unicode.utf8ToUtf16LeStringLiteral;
@@ -27,7 +27,7 @@ pub fn VEH_warden(exception: *win.EXCEPTION_POINTERS) callconv(.c) c_long {
     std.debug.print("excpetion: {x} at {x}\n", .{ exception_record.ExceptionCode, exception_record.ExceptionAddress });
     std.debug.print("died at module: {s}\n", .{global_warden.?.map_address_to_mod(context.Rip)});
     std.debug.print("checking the integrity\n", .{});
-    global_warden.?.check_exe_sections();
+    try global_warden.?.check_exe_sections();
     std.debug.print("supposedly nothing bad was found replaying\n", .{});
 
     return win.EXCEPTION_CONTINUE_SEARCH;
@@ -88,12 +88,13 @@ pub const warden = struct {
 
     pub fn init(allocator: std.mem.Allocator) !Self {
         var self = Self{ .allocator = allocator };
-        self.enumerate_memory();
-        self.enumerate_modules();
-        self.load_initial_exe();
-        self.callbuff = std.ArrayList(*anyopaque).init(allocator);
+        _ = try self.enumerate_memory();
+        _ = try self.enumerate_modules();
+        _ = try self.load_initial_exe();
+        self.callbuff = std.ArrayList(*const anyopaque).init(allocator);
 
         self.init_complete = true;
+        return self;
     }
 
     pub fn enumerate_memory(self: *Self) !void {
@@ -377,13 +378,13 @@ pub const warden = struct {
     pub fn check_exe_sections(self: *Self) !void {
         // 1) Find the .exe entry from our mod_map.
         var exe_key: []const u8 = undefined;
-        var exe_module: *ModuleInfo = null;
+        var exe_module: *ModuleInfo = undefined;
 
         const key_iter = self.mod_map.keyIterator();
-        while (key_iter.next()) |key_slice| {
-            if (std.mem.endsWithScalar(u8, key_slice.*, ".exe")) {
-                exe_key = key_slice.*;
-                exe_module = self.mod_map.get(key_slice.*) orelse continue;
+        while (key_iter.next()) |key| {
+            if (std.mem.endsWithScalar(u8, key.*, ".exe")) {
+                exe_key = key.*;
+                exe_module = self.mod_map.get(key.*) orelse continue;
                 break;
             }
         }

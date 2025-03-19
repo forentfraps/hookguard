@@ -9,7 +9,7 @@ const W = std.unicode.utf8ToUtf16LeStringLiteral;
 
 extern fn save_preserved_registers(*usize, *usize, *usize) void;
 extern fn load_preserved_registers(usize, usize, usize) void;
-extern fn retry_asm(preserved_regs: [*]usize, fptr: *anyopaque, args: *anyopaque, [*]u8) void;
+extern fn retry_asm(*anyopaque) void;
 
 const state_manager_error = error{
     InvalidFuncPtr,
@@ -59,14 +59,11 @@ pub fn CallBuffer(func_ptr: anytype, arg: anytype, warden: warden_lib.warden) !t
 
     // If we got here, the argument matches.
     return struct {
+        registers: [9]usize = undefined,
         func_ptr: func_type = func_ptr,
+        arg_count: usize = fnArgs.len.fields.len,
         arg: arg_type = arg,
-        rbx: usize = undefined,
-        rsp: usize = undefined,
-        rbp: usize = undefined,
-        r15: usize = undefined,
         // TODO add support for xmm+ registers
-        warden: warden_lib.warden = warden,
         arg_sizes: [fnArgs.len.fields.len]u8 = arg_size_closure: {
             var local_arg_sizes: [fnArgs.len.fields]u8 = undefined;
             for (fnArgs, 0..) |fn_arg, i| {
@@ -75,6 +72,8 @@ pub fn CallBuffer(func_ptr: anytype, arg: anytype, warden: warden_lib.warden) !t
 
             break :arg_size_closure local_arg_sizes;
         },
+
+        warden: *warden_lib.warden = warden,
 
         pub fn change_arg(self: *@This(), new_arg: arg_type) fnReturnType {
             self.arg = new_arg;
@@ -105,7 +104,7 @@ pub fn CallBuffer(func_ptr: anytype, arg: anytype, warden: warden_lib.warden) !t
         }
 
         pub fn retry(self: *@This()) noreturn {
-            retry_asm(.{ self.rsp, self.rbp, self.r15 }, self.func_ptr, self.arg, self.arg_sizes);
+            retry_asm(self);
         }
     };
 }

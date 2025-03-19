@@ -6,7 +6,7 @@ const warden_lib = @import("warden.zig");
 
 const syscall = syscall_lib.syscall;
 const W = std.unicode.utf8ToUtf16LeStringLiteral;
-const state_manager = @import("state_maganer.zig");
+const state_manager = @import("state_manager.zig");
 
 pub fn main() !void {
     const ntdll = win.kernel32.GetModuleHandleW(W("ntdll.dll")).?;
