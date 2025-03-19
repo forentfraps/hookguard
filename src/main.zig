@@ -28,7 +28,7 @@ pub fn main() !void {
     var w = try warden_lib.warden.init(std.heap.page_allocator);
     warden_lib.set_global_warden(&w);
     _ = win.kernel32.AddVectoredExceptionHandler(1000, &warden_lib.VEH_warden);
-    const test_f = state_manager.CallBuffer(&test_function, .{ .x = 25 }, w){};
+    const test_f = state_manager.CallBuffer(&test_function, .{ .x = 25 }){};
     test_f.call();
 }
 

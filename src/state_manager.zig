@@ -8,23 +8,21 @@ const syscall = syscall_lib.syscall;
 const W = std.unicode.utf8ToUtf16LeStringLiteral;
 
 extern fn save_preserved_registers(*usize, *usize, *usize) void;
-extern fn load_preserved_registers(usize, usize, usize) void;
-extern fn retry_asm(*anyopaque) void;
 
 const state_manager_error = error{
     InvalidFuncPtr,
     ArgMismatch,
 };
 
-pub fn CallBuffer(func_ptr: anytype, arg: anytype, warden: warden_lib.warden) !type {
+pub fn CallBuffer(func_ptr: anytype, arg: anytype) !type {
     const func_type = @TypeOf(func_ptr);
     const arg_type = @TypeOf(arg);
     const funcTypeInfo = @typeInfo(func_type);
     var fnInfo: type = undefined;
     switch (funcTypeInfo) {
-        .Pointer => |ptrInfo| {
+        .pointer => |ptrInfo| {
             switch (@typeInfo(ptrInfo.child)) {
-                .Fn => |fi| {
+                .@"fn" => |fi| {
                     fnInfo = fi;
                 },
                 else => @compileError("Not a function pointer was provided"),
@@ -39,7 +37,7 @@ pub fn CallBuffer(func_ptr: anytype, arg: anytype, warden: warden_lib.warden) !t
     const argTypeInfo = @typeInfo(arg_type);
     var arg_len: comptime_int = 0;
     _ = switch (argTypeInfo) {
-        .Struct => |structInfo| {
+        .@"struct" => |structInfo| {
             if (structInfo.fields.len != fnArgs.len) {
                 @compileError("Argument mismatch");
             }
@@ -73,8 +71,6 @@ pub fn CallBuffer(func_ptr: anytype, arg: anytype, warden: warden_lib.warden) !t
             break :arg_size_closure local_arg_sizes;
         },
 
-        warden: *warden_lib.warden = warden,
-
         pub fn change_arg(self: *@This(), new_arg: arg_type) fnReturnType {
             self.arg = new_arg;
         }
@@ -86,7 +82,7 @@ pub fn CallBuffer(func_ptr: anytype, arg: anytype, warden: warden_lib.warden) !t
                     .Struct => |s| s.fields,
                     else => @compileError("Argument is not a struct"),
                 };
-                self.warden.register_call(&self);
+                warden_lib.global_warden.?.register_call(&self);
                 save_preserved_registers(&self.rsp, &self.rbp, &self.r15);
                 // Manually dispatch based on the number of arguments.
                 const return_val = switch (fields.len) {
@@ -98,13 +94,9 @@ pub fn CallBuffer(func_ptr: anytype, arg: anytype, warden: warden_lib.warden) !t
                     5 => self.func_ptr(@field(self.arg, fields[0].name), @field(self.arg, fields[1].name), @field(self.arg, fields[2].name), @field(self.arg, fields[3].name), @field(self.arg, fields[4].name)),
                     else => @compileError("Unsupported number of arguments in CallBuffer.call"),
                 };
-                self.warden.deregister_call(&self);
+                warden_lib.global_warden.?.deregister_call(&self);
                 return return_val;
             }
-        }
-
-        pub fn retry(self: *@This()) noreturn {
-            retry_asm(self);
         }
     };
 }

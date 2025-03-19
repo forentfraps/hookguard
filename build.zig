@@ -36,6 +36,22 @@ pub fn build(b: *std.Build) void {
         return;
     };
     exe.addObjectFile(b.path(".zig-cache\\asm_files\\syscall_wrapper.o"));
+    _ = std.process.Child.run(.{
+        .argv = &[_][]const u8{
+            "nasm",
+            "-f",
+            "win64",
+            "src\\state_manager.asm",
+            "-o",
+            ".zig-cache\\asm_files\\state_manager.o",
+        },
+        .allocator = std.heap.page_allocator,
+    }) catch |e| {
+        std.debug.print("Asm build failed -> {}\n", .{e});
+        return;
+    };
+    exe.addObjectFile(b.path(".zig-cache\\asm_files\\syscall_wrapper.o"));
+
     // This declares intent for the executable to be installed into the
     // standard location when the user invokes the "install" step (the default
     // step when running `zig build`).

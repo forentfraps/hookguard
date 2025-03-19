@@ -7,6 +7,8 @@ const state_manager = @import("state_manager.zig");
 const syscall = syscall_lib.syscall;
 const W = std.unicode.utf8ToUtf16LeStringLiteral;
 
+extern fn retry_asm(*anyopaque) void;
+
 var global_warden: ?*warden = null;
 
 pub fn set_global_warden(w: *warden) void {
@@ -22,13 +24,14 @@ const warder_error = error{
 };
 
 pub fn VEH_warden(exception: *win.EXCEPTION_POINTERS) callconv(.c) c_long {
-    const exception_record = exception.ExceptionRecord;
-    const context = exception.ContextRecord;
-    std.debug.print("excpetion: {x} at {x}\n", .{ exception_record.ExceptionCode, exception_record.ExceptionAddress });
-    std.debug.print("died at module: {s}\n", .{global_warden.?.map_address_to_mod(context.Rip)});
-    std.debug.print("checking the integrity\n", .{});
+    _ = exception.ExceptionRecord;
+    _ = exception.ContextRecord;
+    // std.debug.print("excpetion: {x} at {x}\n", .{ exception_record.ExceptionCode, exception_record.ExceptionAddress });
+    // std.debug.print("died at module: {s}\n", .{global_warden.?.map_address_to_mod(context.Rip)});
+    // std.debug.print("checking the integrity\n", .{});
     try global_warden.?.check_exe_sections();
-    std.debug.print("supposedly nothing bad was found replaying\n", .{});
+    // std.debug.print("supposedly nothing bad was found replaying\n", .{});
+    retry_asm(global_warden.?.callbuff.items[global_warden.?.callbuff.len]);
 
     return win.EXCEPTION_CONTINUE_SEARCH;
 }
@@ -380,7 +383,7 @@ pub const warden = struct {
         var exe_key: []const u8 = undefined;
         var exe_module: *ModuleInfo = undefined;
 
-        const key_iter = self.mod_map.keyIterator();
+        var key_iter = self.mod_map.keyIterator();
         while (key_iter.next()) |key| {
             if (std.mem.endsWithScalar(u8, key.*, ".exe")) {
                 exe_key = key.*;
