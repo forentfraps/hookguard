@@ -6,6 +6,7 @@ const warden_lib = @import("warden.zig");
 
 const syscall = syscall_lib.syscall;
 const W = std.unicode.utf8ToUtf16LeStringLiteral;
+const state_manager = @import("state_maganer.zig");
 
 pub fn main() !void {
     const ntdll = win.kernel32.GetModuleHandleW(W("ntdll.dll")).?;
@@ -24,8 +25,20 @@ pub fn main() !void {
     std.debug.print("Syscall returned: {x}\n", .{result});
 
     // std.debug.print("Reprotecting ntdll\n");
-    var w = warden_lib.warden{ .allocator = std.heap.page_allocator };
-    try w.enumerate_memory();
-    try w.enumerate_modules();
-    try w.load_initial_exe();
+    var w = try warden_lib.warden.init(std.heap.page_allocator);
+    warden_lib.set_global_warden(&w);
+    _ = win.kernel32.AddVectoredExceptionHandler(1000, &warden_lib.VEH_warden);
+    const test_f = state_manager.CallBuffer(&test_function, .{ .x = 25 }, w){};
+    test_f.call();
+}
+
+var tries: i8 = 0;
+
+pub fn test_function(x: u32) void {
+    if (tries == 0) {
+        std.debug.print("First entry, simulating bad behaviour\n", .{});
+        tries = 1;
+        asm volatile (".byte 0xcc");
+    }
+    std.debug.print("x is {d}\n", .{x});
 }

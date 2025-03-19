@@ -2,11 +2,16 @@ const std = @import("std");
 const syscall_lib = @import("syscall.zig");
 const winc = @import("Windows.h.zig");
 const win = std.os.windows;
+const state_manager = @import("state_maganer.zig");
 
 const syscall = syscall_lib.syscall;
 const W = std.unicode.utf8ToUtf16LeStringLiteral;
 
-var global_warden: ?warden = null;
+var global_warden: ?*warden = null;
+
+pub fn set_global_warden(w: *warden) void {
+    global_warden = w;
+}
 
 const warder_error = error{
     SnapshotFail,
@@ -16,10 +21,17 @@ const warder_error = error{
     InvalidNTSignature,
 };
 
-// pub fn VEH_warden(exception: *win.EXCEPTION_POINTERS) usize {
-//     const exception_record = exception.ExceptionRecord;
-//     const _context = exception.ContextRecord;
-// }
+pub fn VEH_warden(exception: *win.EXCEPTION_POINTERS) callconv(.c) c_long {
+    const exception_record = exception.ExceptionRecord;
+    const context = exception.ContextRecord;
+    std.debug.print("excpetion: {x} at {x}\n", .{ exception_record.ExceptionCode, exception_record.ExceptionAddress });
+    std.debug.print("died at module: {s}\n", .{global_warden.?.map_address_to_mod(context.Rip)});
+    std.debug.print("checking the integrity\n", .{});
+    global_warden.?.check_exe_sections();
+    std.debug.print("supposedly nothing bad was found replaying\n", .{});
+
+    return win.EXCEPTION_CONTINUE_SEARCH;
+}
 pub const PageInfo = struct {
     baseAddr: usize,
     regionSize: usize,
@@ -67,11 +79,22 @@ pub const warden = struct {
     protect_syscall: syscall = undefined,
     continue_syscall: syscall = undefined,
 
+    exe_buf: []u8 = undefined,
     sections: []MappedMockSection = undefined,
+
+    callbuff: std.ArrayList(*const anyopaque) = undefined,
 
     const Self = @This();
 
-    // get_all_pages
+    pub fn init(allocator: std.mem.Allocator) !Self {
+        var self = Self{ .allocator = allocator };
+        self.enumerate_memory();
+        self.enumerate_modules();
+        self.load_initial_exe();
+        self.callbuff = std.ArrayList(*anyopaque).init(allocator);
+
+        self.init_complete = true;
+    }
 
     pub fn enumerate_memory(self: *Self) !void {
         const allocator = self.allocator;
@@ -213,14 +236,11 @@ pub const warden = struct {
         const buffer = try self.allocator.alloc(u8, file_size);
         _ = try file.readAll(buffer);
         file.close();
-        try self.fix_rva(buffer, base_addr);
+        self.exe_buf = buffer;
+        try self.fix_rva(self.exe_buf, base_addr);
         return;
     }
 
-    // fix_rva:
-    // Parse the DOS header to locate the NT headers, then iterate over all section headers
-    // to “fix” their VirtualAddress values. In this placeholder example the fix simply sets
-    // the section’s VirtualAddress to be its PointerToRawData plus an offset (0x1000).
     pub fn fix_rva(self: *Self, buffer: []u8, base_addr: usize) !void {
         if (buffer.len < @sizeOf(winc.IMAGE_DOS_HEADER)) {
             return warder_error.InvalidBuffer;
@@ -251,7 +271,8 @@ pub const warden = struct {
         self.sections = try self.allocator.alloc(MappedMockSection, numSections);
 
         for (sections[0..numSections], 0..) |section, i| {
-            const section_name_trimmed = (&section.Name)[0..std.mem.len(@as([*:0]u8, @constCast(@ptrCast(&section.Name))))];
+            const cast_name = @as([*:0]u8, @constCast(@ptrCast(&sections[i].Name)));
+            const section_name_trimmed = cast_name[0..std.mem.len(cast_name)];
             self.sections[i] =
                 MappedMockSection{
                     .virtual_address = section.VirtualAddress,
@@ -259,14 +280,17 @@ pub const warden = struct {
                     .size = section.SizeOfRawData,
                     .ptr = buffer[section.PointerToRawData..].ptr,
                 };
-            if (std.mem.eql(u8, section_name_trimmed, ".reloc".ptr[0..6])) {
+
+            // std.debug.print("{*} == {*}\n", .{ &(section.Name), section_name_trimmed });
+            if (std.mem.eql(u8, section_name_trimmed, ".reloc")) {
                 raw_reloc_ptr = buffer[section.PointerToRawData..].ptr;
-                std.debug.print("raw_reloc_ptr {*}\n", .{raw_reloc_ptr});
+                // std.debug.print("raw_reloc_ptr {*}\n", .{raw_reloc_ptr});
             }
         }
+
         const relocation_table: [*]u8 = raw_reloc_ptr;
         var relocations_processed: u32 = 0;
-        std.debug.print("virt addr of reloca table: {*}\n", .{relocation_table});
+        // std.debug.print("virt addr of reloca table: {*}\n", .{relocation_table});
 
         while (relocations_processed < relocations.Size) {
             const relocation_block: *align(1) BASE_RELOCATION_BLOCK = @ptrCast(@alignCast(relocation_table[relocations_processed..]));
@@ -277,16 +301,21 @@ pub const warden = struct {
             for (0..relocations_count) |entry_index| {
                 if (relocation_entries[entry_index].Type != 0) {
                     const relocation_rva: usize = relocation_block.PageAddress + relocation_entries[entry_index].Offset;
-                    std.debug.print("address to fix is {x} off the base\n", .{relocation_rva});
+                    // std.debug.print("address to fix is {x} off the base\n", .{relocation_rva});
                     //log.info("Value before rva is {x} changing to {*}\n", .{ ptr.*, ptr });
                     var section_pointer: [*]u8 = undefined;
-                    for (self.sections) |section| {
+                    var section_offset_virtual: usize = undefined;
+                    for (0..self.sections.len) |i| {
+                        const section: MappedMockSection = self.sections[i];
                         if (relocation_rva >= section.virtual_address and relocation_rva <= (section.virtual_address + section.size)) {
                             section_pointer = section.ptr;
+                            section_offset_virtual = section.virtual_address;
+                            // std.debug.print("Section rva {s}\n", .{section.name});
                             break;
                         }
                     }
-                    const ptr: *align(1) usize = @ptrCast(section_pointer[relocation_rva..]);
+                    const ptr: *align(1) usize = @ptrCast(section_pointer[relocation_rva - section_offset_virtual ..]);
+                    // std.debug.print("{*} - {x}\n", .{ ptr, ptr.* });
                     ptr.* = ptr.* + offset;
 
                     //address_to_patch += offset;
@@ -301,12 +330,152 @@ pub const warden = struct {
     }
     // load_initial_exe
     // fix_rva_imports
+    // fix_iat
     //
-    // backtrace_evil_call
     //
     // map_address_to_mod
     // map_address_to_page
     // map_page_to_mod
+    //
+    /// Given an absolute address, find the module (ModuleInfo) that contains it.
+    pub fn map_address_to_mod(self: *Self, address: usize) ?ModuleInfo {
+        var mod_iter = self.mod_map.iterator();
+        while (mod_iter.next()) |entry| {
+            const mod_info = entry.value_ptr.*;
+            if (address >= mod_info.baseAddr and address < mod_info.baseAddr + mod_info.size) {
+                return mod_info;
+            }
+        }
+        return null;
+    }
+
+    /// Given an absolute address, find the page (PageInfo) that contains it.
+    pub fn map_address_to_page(self: *Self, address: usize) ?PageInfo {
+        var page_iter = self.page_map.iterator();
+        while (page_iter.next()) |entry| {
+            const page = entry.value_ptr.*;
+            if (address >= page.baseAddr and address < page.baseAddr + page.regionSize) {
+                return page;
+            }
+        }
+        return null;
+    }
+
+    /// Given a PageInfo, find the module (ModuleInfo) that contains that page.
+    pub fn map_page_to_mod(self: *Self, page: PageInfo) ?ModuleInfo {
+        // Here we use the page's base address to determine the module that contains it.
+        var mod_iter = self.mod_map.iterator();
+        while (mod_iter.next()) |entry| {
+            const mod_info = entry.value_ptr.*;
+            if (page.baseAddr >= mod_info.baseAddr and page.baseAddr < mod_info.baseAddr + mod_info.size) {
+                return mod_info;
+            }
+        }
+        return null;
+    }
+
+    pub fn check_exe_sections(self: *Self) !void {
+        // 1) Find the .exe entry from our mod_map.
+        var exe_key: []const u8 = undefined;
+        var exe_module: *ModuleInfo = null;
+
+        const key_iter = self.mod_map.keyIterator();
+        while (key_iter.next()) |key_slice| {
+            if (std.mem.endsWithScalar(u8, key_slice.*, ".exe")) {
+                exe_key = key_slice.*;
+                exe_module = self.mod_map.get(key_slice.*) orelse continue;
+                break;
+            }
+        }
+
+        if (exe_module == null) {
+            return error.ModuleNotFound;
+        }
+
+        // The base address of the loaded .exe in memory
+        const base_addr_usize = exe_module.baseAddr;
+        const base_addr_ptr: *const u8 = @ptrFromInt(base_addr_usize);
+
+        // 2) Parse the DOS header from the loaded memory
+        if (@sizeOf(winc.IMAGE_DOS_HEADER) > 0 and base_addr_ptr == null) {
+            return error.InvalidModuleBase;
+        }
+        const dos_header: *const winc.IMAGE_DOS_HEADER = @ptrCast(base_addr_ptr);
+        if (dos_header.e_magic != winc.IMAGE_DOS_SIGNATURE) {
+            return error.InvalidDOSHeader;
+        }
+
+        // 3) Parse the NT headers
+        const nt_header_offset: usize = @intCast(dos_header.e_lfanew);
+        const nt_headers: *const winc.IMAGE_NT_HEADERS = @ptrCast(base_addr_ptr + nt_header_offset);
+        if (nt_headers.Signature != winc.IMAGE_NT_SIGNATURE) {
+            return error.InvalidNTSignature;
+        }
+
+        // 4) Get the first section header. This is right after the OptionalHeader.
+        const file_header = nt_headers.FileHeader;
+        const optional_header_size = file_header.SizeOfOptionalHeader;
+
+        // Points to the first IMAGE_SECTION_HEADER in memory
+        const first_section_header: *const winc.IMAGE_SECTION_HEADER =
+            @ptrCast(&nt_headers.OptionalHeader + optional_header_size);
+
+        // Number of sections as reported by the PE file
+        const section_count = file_header.NumberOfSections;
+
+        if (section_count == 0) {
+            // No sections to check
+            return;
+        }
+
+        // 5) Compare each loaded section to the corresponding bytes in self.exe_buf
+        //    (which should contain the on-disk copy of the executable).
+        for (0..section_count) |sec_index| {
+            const sec_header = first_section_header[sec_index];
+
+            // If the section has no raw data, skip
+            if (sec_header.SizeOfRawData == 0) continue;
+
+            // The memory range for this section in the running process
+            const loaded_sec_start_ptr = base_addr_ptr + sec_header.VirtualAddress;
+            const loaded_sec_slice = loaded_sec_start_ptr[0..sec_header.SizeOfRawData];
+
+            // The on-disk section bytes in self.exe_buf (already read from file).
+            // Make sure we don’t go out of bounds on exe_buf in case of malformed sections.
+            const raw_start = sec_header.PointerToRawData;
+            const raw_size = sec_header.SizeOfRawData;
+            if (raw_start + raw_size > self.exe_buf.len) {
+                return error.InvalidSectionSize;
+            }
+            const disk_sec_slice = self.exe_buf[raw_start .. raw_start + raw_size];
+
+            // Compare them directly. If they differ, it means the loaded section
+            // has been modified or patched since loading.
+            if (!std.mem.eql(u8, loaded_sec_slice, disk_sec_slice)) {
+                return error.SectionMismatch;
+            }
+        }
+
+        // If we reach here, all sections matched exactly.
+        // You can return success or print a message as needed.
+        return;
+    }
+
+    pub fn register_call(self: *Self, callbuf: *const anyopaque) void {
+        self.callbuff.append(callbuf);
+        //protection logic
+
+    }
+    pub fn deregister_call(self: *Self, callbuf: *const anyopaque) void {
+        const ptr = self.callbuff.pop();
+        if (ptr != callbuf) {
+            std.debug.print("tragic... Ptrs did not match during call deregistering\n", .{});
+        }
+        //protection logic
+
+    }
+
+    //
     // protect_global
     // protect_page
     // unprotect_page
@@ -317,3 +486,13 @@ pub const warden = struct {
     // unscramble_nt
     //
 };
+
+fn is_page_executable(access: u32) bool {
+    // These are example Windows page protection constants.
+    // Adjust them if your definitions differ.
+    const PAGE_EXECUTE = 0x10;
+    const PAGE_EXECUTE_READ = 0x20;
+    const PAGE_EXECUTE_READWRITE = 0x40;
+    const PAGE_EXECUTE_WRITECOPY = 0x80;
+    return access == PAGE_EXECUTE or access == PAGE_EXECUTE_READ or access == PAGE_EXECUTE_READWRITE or access == PAGE_EXECUTE_WRITECOPY;
+}
