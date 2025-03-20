@@ -28,17 +28,20 @@ pub fn main() !void {
     var w = try warden_lib.warden.init(std.heap.page_allocator);
     warden_lib.set_global_warden(&w);
     _ = win.kernel32.AddVectoredExceptionHandler(1000, &warden_lib.VEH_warden);
-    const test_f = state_manager.CallBuffer(&test_function, .{ .x = 25 }){};
-    test_f.call();
+    const n: u32 = 25;
+    const m: u32 = 35;
+    var test_f = state_manager.CallBuffer(&test_function, .{ n, m }){};
+    _ = test_f.call();
 }
 
 var tries: i8 = 0;
 
-pub fn test_function(x: u32) void {
+pub fn test_function(x: u32, y: u32) callconv(.C) void {
     if (tries == 0) {
         std.debug.print("First entry, simulating bad behaviour\n", .{});
         tries = 1;
         asm volatile (".byte 0xcc");
     }
     std.debug.print("x is {d}\n", .{x});
+    std.debug.print("y is {d}\n", .{y});
 }

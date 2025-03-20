@@ -50,7 +50,7 @@ pub fn build(b: *std.Build) void {
         std.debug.print("Asm build failed -> {}\n", .{e});
         return;
     };
-    exe.addObjectFile(b.path(".zig-cache\\asm_files\\syscall_wrapper.o"));
+    exe.addObjectFile(b.path(".zig-cache\\asm_files\\state_manager.o"));
 
     // This declares intent for the executable to be installed into the
     // standard location when the user invokes the "install" step (the default

@@ -7,9 +7,9 @@ const state_manager = @import("state_manager.zig");
 const syscall = syscall_lib.syscall;
 const W = std.unicode.utf8ToUtf16LeStringLiteral;
 
-extern fn retry_asm(*anyopaque) void;
+extern fn retry_asm(*const anyopaque) void;
 
-var global_warden: ?*warden = null;
+pub var global_warden: ?*warden = null;
 
 pub fn set_global_warden(w: *warden) void {
     global_warden = w;
@@ -24,14 +24,19 @@ const warder_error = error{
 };
 
 pub fn VEH_warden(exception: *win.EXCEPTION_POINTERS) callconv(.c) c_long {
-    _ = exception.ExceptionRecord;
-    _ = exception.ContextRecord;
-    // std.debug.print("excpetion: {x} at {x}\n", .{ exception_record.ExceptionCode, exception_record.ExceptionAddress });
-    // std.debug.print("died at module: {s}\n", .{global_warden.?.map_address_to_mod(context.Rip)});
-    // std.debug.print("checking the integrity\n", .{});
-    try global_warden.?.check_exe_sections();
-    // std.debug.print("supposedly nothing bad was found replaying\n", .{});
-    retry_asm(global_warden.?.callbuff.items[global_warden.?.callbuff.len]);
+    const exception_record = exception.ExceptionRecord;
+    const context = exception.ContextRecord;
+    std.debug.print("excpetion: {x} at {x}\n", .{ exception_record.ExceptionCode, exception_record.ExceptionAddress });
+    std.debug.print("died at module: {any}\n", .{global_warden.?.map_address_to_mod(context.Rip).?});
+    std.debug.print("checking the integrity\n", .{});
+    if (exception_record.ExceptionCode == 0xc0000005) {
+        return win.EXCEPTION_CONTINUE_SEARCH;
+    }
+    global_warden.?.check_exe_sections() catch {
+        std.debug.print("FAILED at verifying\n", .{});
+    };
+    std.debug.print("supposedly nothing bad was found replaying\n", .{});
+    retry_asm(global_warden.?.callbuff.items[global_warden.?.callbuff.items.len - 1]);
 
     return win.EXCEPTION_CONTINUE_SEARCH;
 }
@@ -381,48 +386,44 @@ pub const warden = struct {
     pub fn check_exe_sections(self: *Self) !void {
         // 1) Find the .exe entry from our mod_map.
         var exe_key: []const u8 = undefined;
-        var exe_module: *ModuleInfo = undefined;
+        var exe_module: ModuleInfo = undefined;
 
         var key_iter = self.mod_map.keyIterator();
         while (key_iter.next()) |key| {
-            if (std.mem.endsWithScalar(u8, key.*, ".exe")) {
+            if (std.mem.eql(u8, key.*[key.*.len - 4 ..], ".exe")) {
                 exe_key = key.*;
                 exe_module = self.mod_map.get(key.*) orelse continue;
                 break;
             }
         }
 
-        if (exe_module == null) {
-            return error.ModuleNotFound;
-        }
-
         // The base address of the loaded .exe in memory
         const base_addr_usize = exe_module.baseAddr;
-        const base_addr_ptr: *const u8 = @ptrFromInt(base_addr_usize);
+        const base_addr_ptr: ?*const u8 = @ptrFromInt(base_addr_usize);
 
         // 2) Parse the DOS header from the loaded memory
         if (@sizeOf(winc.IMAGE_DOS_HEADER) > 0 and base_addr_ptr == null) {
             return error.InvalidModuleBase;
         }
-        const dos_header: *const winc.IMAGE_DOS_HEADER = @ptrCast(base_addr_ptr);
+        const dos_header: *const winc.IMAGE_DOS_HEADER = @alignCast(@ptrCast(base_addr_ptr.?));
         if (dos_header.e_magic != winc.IMAGE_DOS_SIGNATURE) {
             return error.InvalidDOSHeader;
         }
 
         // 3) Parse the NT headers
         const nt_header_offset: usize = @intCast(dos_header.e_lfanew);
-        const nt_headers: *const winc.IMAGE_NT_HEADERS = @ptrCast(base_addr_ptr + nt_header_offset);
+        const nt_headers: *const winc.IMAGE_NT_HEADERS = @ptrFromInt(@intFromPtr(base_addr_ptr.?) + nt_header_offset);
         if (nt_headers.Signature != winc.IMAGE_NT_SIGNATURE) {
             return error.InvalidNTSignature;
         }
 
         // 4) Get the first section header. This is right after the OptionalHeader.
         const file_header = nt_headers.FileHeader;
-        const optional_header_size = file_header.SizeOfOptionalHeader;
+        const optional_header_size: usize = @intCast(file_header.SizeOfOptionalHeader);
 
         // Points to the first IMAGE_SECTION_HEADER in memory
-        const first_section_header: *const winc.IMAGE_SECTION_HEADER =
-            @ptrCast(&nt_headers.OptionalHeader + optional_header_size);
+        const first_section_header: [*]const winc.IMAGE_SECTION_HEADER =
+            @ptrFromInt(@intFromPtr(&nt_headers.OptionalHeader) + optional_header_size);
 
         // Number of sections as reported by the PE file
         const section_count = file_header.NumberOfSections;
@@ -441,7 +442,7 @@ pub const warden = struct {
             if (sec_header.SizeOfRawData == 0) continue;
 
             // The memory range for this section in the running process
-            const loaded_sec_start_ptr = base_addr_ptr + sec_header.VirtualAddress;
+            const loaded_sec_start_ptr: [*]u8 = @ptrFromInt(@intFromPtr(base_addr_ptr.?) + sec_header.VirtualAddress);
             const loaded_sec_slice = loaded_sec_start_ptr[0..sec_header.SizeOfRawData];
 
             // The on-disk section bytes in self.exe_buf (already read from file).
@@ -465,8 +466,8 @@ pub const warden = struct {
         return;
     }
 
-    pub fn register_call(self: *Self, callbuf: *const anyopaque) void {
-        self.callbuff.append(callbuf);
+    pub fn register_call(self: *Self, callbuf: *const anyopaque) !void {
+        try self.callbuff.append(callbuf);
         //protection logic
 
     }
