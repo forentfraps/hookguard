@@ -439,7 +439,12 @@ pub const warden = struct {
             const sec_header = first_section_header[sec_index];
 
             // If the section has no raw data, skip
+            std.debug.print("Section index: {d}\n", .{sec_index});
             if (sec_header.SizeOfRawData == 0) continue;
+            if (!std.mem.eql(u8, sec_header.Name[0..5], ".text")) {
+                std.debug.print("skipping not text: {s}\n", .{sec_header.Name});
+                continue;
+            }
 
             // The memory range for this section in the running process
             const loaded_sec_start_ptr: [*]u8 = @ptrFromInt(@intFromPtr(base_addr_ptr.?) + sec_header.VirtualAddress);
@@ -457,6 +462,7 @@ pub const warden = struct {
             // Compare them directly. If they differ, it means the loaded section
             // has been modified or patched since loading.
             if (!std.mem.eql(u8, loaded_sec_slice, disk_sec_slice)) {
+                std.debug.print("bad section \n", .{});
                 return error.SectionMismatch;
             }
         }
@@ -477,7 +483,6 @@ pub const warden = struct {
             std.debug.print("tragic... Ptrs did not match during call deregistering\n", .{});
         }
         //protection logic
-
     }
 
     //
