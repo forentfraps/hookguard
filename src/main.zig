@@ -1,5 +1,5 @@
 const std = @import("std");
-const syscall_lib = @import("syscall.zig");
+const syscall_lib = @import("syscall_wrapper.zig");
 const winc = @import("Windows.h.zig");
 const win = std.os.windows;
 const warden_lib = @import("warden.zig");
