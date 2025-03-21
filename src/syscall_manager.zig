@@ -1,5 +1,5 @@
 const std = @import("std");
-const syscall_lib = @import("syscall.zig");
+const syscall_lib = @import("syscall_wrapper.zig");
 const winc = @import("Windows.h.zig");
 const win = std.os.windows;
 const warden_lib = @import("warden.zig");
@@ -14,12 +14,37 @@ const syscall_manager_error = error{
 pub const SyscallManager = struct {
     _NtVirtualProtectMemorySyscall: ?syscall_wrapper = null,
     _NtVirtualAllocateMemorySyscall: ?syscall_wrapper = null,
+    _NtOpenProcess: ?syscall_wrapper = null,
 
     const Self = @This();
 
     pub fn addNTVPM(self: *Self, _syscall: syscall_wrapper) void {
-        self.NtVirtualProtectMemorySyscall = _syscall;
+        self._NtVirtualProtectMemorySyscall = _syscall;
         return;
+    }
+
+    pub fn addNOP(self: *Self, _syscall: syscall_wrapper) void {
+        self._NtOpenProcess = _syscall;
+        return;
+    }
+
+    pub fn NtOpenProcess(
+        self: *Self,
+        ProcessHandle: *usize,
+        DesiredAcess: usize,
+        ObjectAttributes: *win.OBJECT_ATTRIBUTES,
+        ClientId: usize,
+    ) !win.NTSTATUS {
+        if (self._NtOpenProcess == null) {
+            return syscall_manager_error.SyscallMissing;
+        }
+
+        return self._NtpOpenProcess.call(.{
+            ProcessHandle,
+            DesiredAcess,
+            ObjectAttributes,
+            ClientId,
+        });
     }
 
     pub fn NtVirtualProtectMemory(

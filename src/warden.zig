@@ -3,8 +3,10 @@ const syscall_lib = @import("syscall_wrapper.zig");
 const winc = @import("Windows.h.zig");
 const win = std.os.windows;
 const state_manager = @import("state_manager.zig");
+const syscall_manager_lib = @import("syscall_manager.zig");
 
 const syscall = syscall_lib.syscall;
+const syscall_manager = syscall_manager_lib.SyscallManager;
 const W = std.unicode.utf8ToUtf16LeStringLiteral;
 
 extern fn retry_asm(*const anyopaque) void;
@@ -26,8 +28,14 @@ const warder_error = error{
 pub fn VEH_warden(exception: *win.EXCEPTION_POINTERS) callconv(.c) c_long {
     const exception_record = exception.ExceptionRecord;
     const context = exception.ContextRecord;
-    std.debug.print("excpetion: {x} at {x}\n", .{ exception_record.ExceptionCode, exception_record.ExceptionAddress });
-    std.debug.print("died at module: {any}\n", .{global_warden.?.map_address_to_mod(context.Rip).?});
+    std.debug.print(
+        "excpetion: {x} at {x}\n",
+        .{ exception_record.ExceptionCode, exception_record.ExceptionAddress },
+    );
+    std.debug.print(
+        "died at module: {any}\n",
+        .{global_warden.?.map_address_to_mod(context.Rip).?},
+    );
     std.debug.print("checking the integrity\n", .{});
     if (exception_record.ExceptionCode == 0xc0000005) {
         return win.EXCEPTION_CONTINUE_SEARCH;
@@ -44,8 +52,7 @@ pub const PageInfo = struct {
     baseAddr: usize,
     regionSize: usize,
     access: u32,
-
-    const Self = @This();
+    unprotected_access: u32,
 };
 
 const PageMap = std.AutoHashMap(usize, PageInfo);
@@ -84,11 +91,10 @@ pub const warden = struct {
     nt_scrambled: bool = false,
     init_complete: bool = false,
 
-    protect_syscall: syscall = undefined,
-    continue_syscall: syscall = undefined,
-
     exe_buf: []u8 = undefined,
     sections: []MappedMockSection = undefined,
+
+    syscall_manager: syscall_manager = undefined,
 
     callbuff: std.ArrayList(*const anyopaque) = undefined,
 
@@ -100,12 +106,13 @@ pub const warden = struct {
         _ = try self.enumerate_modules();
         _ = try self.load_initial_exe();
         self.callbuff = std.ArrayList(*const anyopaque).init(allocator);
+        self.syscall_manager = syscall_manager{};
 
         self.init_complete = true;
         return self;
     }
 
-    pub fn enumerate_memory(self: *Self) !void {
+    fn enumerate_memory(self: *Self) !void {
         const allocator = self.allocator;
         var pages_map = std.AutoHashMap(usize, PageInfo).init(allocator);
 
@@ -133,6 +140,7 @@ pub const warden = struct {
                     .baseAddr = key,
                     .regionSize = mbi.RegionSize,
                     .access = mbi.Protect,
+                    .unprotected_access = mbi.Protect,
                 };
                 // Insert into the hashmap. If the key already exists, this returns an error.
                 try pages_map.put(key, page);
@@ -149,7 +157,7 @@ pub const warden = struct {
     // For each module, we create an entry in a map keyed by the module name.
     // The ModuleInfo struct stores the module’s base address, its size, and a list of
     // PageInfo structs that fall within the module’s address range.
-    pub fn enumerate_modules(self: *Self) !void {
+    fn enumerate_modules(self: *Self) !void {
         var modules_map = ModuleMap.init(self.allocator);
 
         // Get the current process ID.
@@ -158,7 +166,8 @@ pub const warden = struct {
 
         // Create a snapshot of all modules in the current process.
         // TODO no winapi
-        const snapshot = win.kernel32.CreateToolhelp32Snapshot(win.TH32CS_SNAPMODULE | win.TH32CS_SNAPMODULE32, currentPID);
+        const snapshot =
+            win.kernel32.CreateToolhelp32Snapshot(win.TH32CS_SNAPMODULE | win.TH32CS_SNAPMODULE32, currentPID);
         if (snapshot == win.INVALID_HANDLE_VALUE) {
             return warder_error.SnapshotFail;
         }
@@ -216,7 +225,7 @@ pub const warden = struct {
         self.mod_map = modules_map;
         return;
     }
-    pub fn load_initial_exe(self: *Self) !void {
+    fn load_initial_exe(self: *Self) !void {
         // Check that the module exists in our modules map.
         var map_iterator = self.mod_map.keyIterator();
         var mod_name: []const u8 = undefined;
@@ -250,7 +259,7 @@ pub const warden = struct {
         return;
     }
 
-    pub fn fix_rva(self: *Self, buffer: []u8, base_addr: usize) !void {
+    fn fix_rva(self: *Self, buffer: []u8, base_addr: usize) !void {
         if (buffer.len < @sizeOf(winc.IMAGE_DOS_HEADER)) {
             return warder_error.InvalidBuffer;
         }
@@ -270,9 +279,11 @@ pub const warden = struct {
         }
 
         const offset = base_addr - nt_headers.OptionalHeader.ImageBase;
-        const relocations = nt_headers.OptionalHeader.DataDirectory[winc.IMAGE_DIRECTORY_ENTRY_BASERELOC];
+        const relocations =
+            nt_headers.OptionalHeader.DataDirectory[winc.IMAGE_DIRECTORY_ENTRY_BASERELOC];
         const optHeaderSize = nt_headers.FileHeader.SizeOfOptionalHeader;
-        const sections_ptr: *align(1) winc.IMAGE_SECTION_HEADER = (@ptrCast((@as([*]u8, @constCast(@ptrCast(&nt_headers.OptionalHeader)))) + optHeaderSize));
+        const sections_ptr: *align(1) winc.IMAGE_SECTION_HEADER =
+            (@ptrCast((@as([*]u8, @constCast(@ptrCast(&nt_headers.OptionalHeader)))) + optHeaderSize));
         // Create a slice over the section headers.
         const numSections = nt_headers.FileHeader.NumberOfSections;
         const sections: [*]align(1) winc.IMAGE_SECTION_HEADER = @ptrCast(sections_ptr);
@@ -302,28 +313,35 @@ pub const warden = struct {
         // std.debug.print("virt addr of reloca table: {*}\n", .{relocation_table});
 
         while (relocations_processed < relocations.Size) {
-            const relocation_block: *align(1) BASE_RELOCATION_BLOCK = @ptrCast(@alignCast(relocation_table[relocations_processed..]));
+            const relocation_block: *align(1) BASE_RELOCATION_BLOCK =
+                @ptrCast(@alignCast(relocation_table[relocations_processed..]));
             relocations_processed += @sizeOf(BASE_RELOCATION_BLOCK);
-            const relocations_count = (relocation_block.BlockSize - @sizeOf(BASE_RELOCATION_BLOCK)) / @sizeOf(BASE_RELOCATION_ENTRY);
-            const relocation_entries: [*]align(1) BASE_RELOCATION_ENTRY = @ptrCast(@alignCast(relocation_table[relocations_processed..]));
+            const relocations_count =
+                (relocation_block.BlockSize - @sizeOf(BASE_RELOCATION_BLOCK)) / @sizeOf(BASE_RELOCATION_ENTRY);
+            const relocation_entries: [*]align(1) BASE_RELOCATION_ENTRY =
+                @ptrCast(@alignCast(relocation_table[relocations_processed..]));
 
             for (0..relocations_count) |entry_index| {
                 if (relocation_entries[entry_index].Type != 0) {
-                    const relocation_rva: usize = relocation_block.PageAddress + relocation_entries[entry_index].Offset;
+                    const relocation_rva: usize =
+                        relocation_block.PageAddress + relocation_entries[entry_index].Offset;
                     // std.debug.print("address to fix is {x} off the base\n", .{relocation_rva});
                     //log.info("Value before rva is {x} changing to {*}\n", .{ ptr.*, ptr });
                     var section_pointer: [*]u8 = undefined;
                     var section_offset_virtual: usize = undefined;
                     for (0..self.sections.len) |i| {
                         const section: MappedMockSection = self.sections[i];
-                        if (relocation_rva >= section.virtual_address and relocation_rva <= (section.virtual_address + section.size)) {
+                        if (relocation_rva >= section.virtual_address and
+                            relocation_rva <= (section.virtual_address + section.size))
+                        {
                             section_pointer = section.ptr;
                             section_offset_virtual = section.virtual_address;
                             // std.debug.print("Section rva {s}\n", .{section.name});
                             break;
                         }
                     }
-                    const ptr: *align(1) usize = @ptrCast(section_pointer[relocation_rva - section_offset_virtual ..]);
+                    const ptr: *align(1) usize =
+                        @ptrCast(section_pointer[relocation_rva - section_offset_virtual ..]);
                     // std.debug.print("{*} - {x}\n", .{ ptr, ptr.* });
                     ptr.* = ptr.* + offset;
 
@@ -376,7 +394,9 @@ pub const warden = struct {
         var mod_iter = self.mod_map.iterator();
         while (mod_iter.next()) |entry| {
             const mod_info = entry.value_ptr.*;
-            if (page.baseAddr >= mod_info.baseAddr and page.baseAddr < mod_info.baseAddr + mod_info.size) {
+            if (page.baseAddr >= mod_info.baseAddr and
+                page.baseAddr < mod_info.baseAddr + mod_info.size)
+            {
                 return mod_info;
             }
         }
@@ -412,7 +432,8 @@ pub const warden = struct {
 
         // 3) Parse the NT headers
         const nt_header_offset: usize = @intCast(dos_header.e_lfanew);
-        const nt_headers: *const winc.IMAGE_NT_HEADERS = @ptrFromInt(@intFromPtr(base_addr_ptr.?) + nt_header_offset);
+        const nt_headers: *const winc.IMAGE_NT_HEADERS =
+            @ptrFromInt(@intFromPtr(base_addr_ptr.?) + nt_header_offset);
         if (nt_headers.Signature != winc.IMAGE_NT_SIGNATURE) {
             return error.InvalidNTSignature;
         }
@@ -447,7 +468,8 @@ pub const warden = struct {
             }
 
             // The memory range for this section in the running process
-            const loaded_sec_start_ptr: [*]u8 = @ptrFromInt(@intFromPtr(base_addr_ptr.?) + sec_header.VirtualAddress);
+            const loaded_sec_start_ptr: [*]u8 =
+                @ptrFromInt(@intFromPtr(base_addr_ptr.?) + sec_header.VirtualAddress);
             const loaded_sec_slice = loaded_sec_start_ptr[0..sec_header.SizeOfRawData];
 
             // The on-disk section bytes in self.exe_buf (already read from file).
@@ -485,6 +507,51 @@ pub const warden = struct {
         //protection logic
     }
 
+    fn change_page_protection(self: *Self, base_addr: usize, protection: u32) !bool {
+        var page: PageInfo = try self.page_map.get(base_addr);
+
+        var obj: win.OBJECT_ATTRIBUTES = undefined;
+        InitializeObjectAttributes(
+            &obj,
+            null,
+            0,
+            null,
+            null,
+        );
+        var clientId: win.CLIENT_ID = undefined;
+        clientId.UniqueProcess = GetCurrentProcessId();
+        clientId.UniqueThread = 0;
+        var process_handle: usize = undefined;
+        const ProcessHandle = try self.syscall_manager.NtOpenProcess(
+            &process_handle,
+            winc.PROCESS_ALL_ACCESS,
+            &obj,
+            &clientId,
+        );
+        var old_access: usize = 0;
+        const ret_val = try self.syscall_manager.NtVirtualProtectMemory(
+            ProcessHandle,
+            page.baseAddr,
+            page.regionSize,
+            protection,
+            &old_access,
+        );
+        if (NT_SUCCESS(ret_val)) {
+            page.access = protection;
+            return true;
+        } else {
+            return false;
+        }
+    }
+    pub fn protect_page(self: *Self, base_addr: usize) !bool{
+        var page: PageInfo = try self.page_map.get(base_addr);
+        return self.change_page_protection(base_addr, win.)
+    }
+
+    pub fn protect_global(self: *Self) bool{
+
+    }
+
     //
     // protect_global
     // protect_page
@@ -497,6 +564,11 @@ pub const warden = struct {
     //
 };
 
+fn NT_SUCCESS(status: winc.NTSTATUS) bool {
+    return (status > 0 and status < 0x3FFFFFFF) or
+        (status > 0x40000000 and status < 0x7FFFFFFF);
+}
+
 fn is_page_executable(access: u32) bool {
     // These are example Windows page protection constants.
     // Adjust them if your definitions differ.
@@ -504,5 +576,28 @@ fn is_page_executable(access: u32) bool {
     const PAGE_EXECUTE_READ = 0x20;
     const PAGE_EXECUTE_READWRITE = 0x40;
     const PAGE_EXECUTE_WRITECOPY = 0x80;
-    return access == PAGE_EXECUTE or access == PAGE_EXECUTE_READ or access == PAGE_EXECUTE_READWRITE or access == PAGE_EXECUTE_WRITECOPY;
+    return access == PAGE_EXECUTE or access == PAGE_EXECUTE_READ or
+        access == PAGE_EXECUTE_READWRITE or access == PAGE_EXECUTE_WRITECOPY;
+}
+fn InitializeObjectAttributes(
+    attrs: *win.OBJECT_ATTRIBUTES,
+    name: ?*u8,
+    attributes: u32,
+    rootDir: ?*void,
+    securityDescriptor: ?*void,
+) void {
+    attrs.Length = @sizeOf(win.OBJECT_ATTRIBUTES);
+    attrs.RootDirectory = rootDir;
+    attrs.ObjectName = name;
+    attrs.Attributes = attributes;
+    attrs.SecurityDescriptor = securityDescriptor;
+    attrs.SecurityQualityOfService = null;
+}
+
+fn GetCurrentProcessId() u32 {
+    return asm volatile ("mov rax, gs:30h\nmov eax, [rax + 0x40]\n"
+        : [ret] "={rax}" (-> usize),
+        :
+        : "rax"
+    );
 }
