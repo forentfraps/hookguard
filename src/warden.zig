@@ -94,6 +94,8 @@ pub const warden = struct {
     exe_buf: []u8 = undefined,
     sections: []MappedMockSection = undefined,
 
+    ntdll_buf: []u8 = undefined,
+
     syscall_manager: syscall_manager = undefined,
 
     callbuff: std.ArrayList(*const anyopaque) = undefined,
@@ -507,9 +509,7 @@ pub const warden = struct {
         //protection logic
     }
 
-    fn change_page_protection(self: *Self, base_addr: usize, protection: u32) !bool {
-        var page: PageInfo = try self.page_map.get(base_addr);
-
+    fn change_page_protection(self: *Self, page: *PageInfo, protection: u32) !bool {
         var obj: win.OBJECT_ATTRIBUTES = undefined;
         InitializeObjectAttributes(
             &obj,
@@ -543,27 +543,74 @@ pub const warden = struct {
             return false;
         }
     }
-    pub fn protect_page(self: *Self, base_addr: usize) !bool{
-        var page: PageInfo = try self.page_map.get(base_addr);
-        return self.change_page_protection(base_addr, win.)
+    pub fn protect_page(self: *Self, page: *PageInfo) !bool {
+        return try self.change_page_protection(
+            &page,
+            stripExecutionProtection(page.unprotected_access),
+        );
+    }
+    pub fn unprotect_page(self: *Self, page: *PageInfo) !bool {
+        return try self.change_page_protection(
+            &page,
+            page.unprotected_access,
+        );
     }
 
-    pub fn protect_global(self: *Self) bool{
+    pub fn protect_global(self: *Self) bool {
+        var hash_iterator = self.module_map.keyIterator();
+        for (hash_iterator.next()) |key| {
+            const key_len = key.*.len;
+            if (std.mem.eql(u8, key.*[key_len - 4 .. key_len], ".exe")) {
+                continue;
+            } else if (std.mem.eql(u8, key.*, "ntdll.dll")) {
+                continue;
+            }
 
+            var page_iterator = self.page_map.keyIterator();
+            for (page_iterator.next()) |page_key| {
+                const page = self.page_map.get(page_key.*);
+                self.protect_page(page);
+            }
+        }
+    }
+    pub fn unprotect_global(self: *Self) bool {
+        var hash_iterator = self.module_map.keyIterator();
+        for (hash_iterator.next()) |key| {
+            const key_len = key.*.len;
+            if (std.mem.eql(u8, key.*[key_len - 4 .. key_len], ".exe")) {
+                continue;
+            } else if (std.mem.eql(u8, key.*, "ntdll.dll")) {
+                continue;
+            }
+
+            var page_iterator = self.page_map.keyIterator();
+            for (page_iterator.next()) |page_key| {
+                const page = self.page_map.get(page_key.*);
+                self.unprotect_page(page);
+            }
+        }
     }
 
-    //
-    // protect_global
-    // protect_page
-    // unprotect_page
-    // unprotect_global
     // prepare_to_scramble_nt
     // scramble_nt
     // unscramble_nt_veh
     // unscramble_nt
     //
 };
-
+pub fn stripExecutionProtection(protect: u32) u32 {
+    // Assume the lower 8 bits represent the basic protection type.
+    const basic = protect & 0xFF;
+    // Preserve any modifiers (flags above the lower 8 bits).
+    const modifiers = protect & ~0xFF;
+    const newBasic: u32 = switch (basic) {
+        win.PAGE_EXECUTE => win.PAGE_READONLY,
+        win.PAGE_EXECUTE_READ => win.PAGE_READONLY,
+        win.PAGE_EXECUTE_READWRITE => win.PAGE_READWRITE,
+        win.PAGE_EXECUTE_WRITECOPY => win.PAGE_WRITECOPY,
+        else => basic,
+    };
+    return newBasic | modifiers;
+}
 fn NT_SUCCESS(status: winc.NTSTATUS) bool {
     return (status > 0 and status < 0x3FFFFFFF) or
         (status > 0x40000000 and status < 0x7FFFFFFF);
