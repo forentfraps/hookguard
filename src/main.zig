@@ -35,9 +35,8 @@ pub fn main() !void {
     // var test_f = CallBuffer(&test_function){};
     var test_f2 = CallBuffer(&test_function2){};
     // _ = test_f.call(.{ @intFromPtr(&n), m });
-    _ = test_f2.call(.{ 1, 2, 3, 4, 5 });
+    // _ = test_f2.call(.{ 1, 2, 3, 4, 5 });
     _ = try w.protect_global();
-    _ = try w.unprotect_global();
 
     _ = test_f2.call(.{ 1, 2, 3, 4, 5 });
 }
@@ -50,10 +49,15 @@ pub fn test_function(x: *u32, y: u32) callconv(.C) void {
         tries = 1;
         asm volatile (".byte 0xcc");
     }
+    tries = 0;
     std.debug.print("x is {d}\n", .{x.*});
     std.debug.print("y is {d}\n", .{y});
 }
 
 pub fn test_function2(a: u32, b: u32, c: u32, d: u32, e: u32) callconv(.C) void {
+    if (tries != 0) {
+        _ = warden_lib.global_warden.?.unprotect_global() catch return;
+    }
+    tries = 1;
     std.debug.print("function2 - {d} {d} {d} {d} {d}\n", .{ a, b, c, d, e });
 }

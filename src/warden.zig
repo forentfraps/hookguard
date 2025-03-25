@@ -32,25 +32,24 @@ const warder_error = error{
 };
 
 pub fn VEH_warden(exception: *win.EXCEPTION_POINTERS) callconv(.c) c_long {
-    std.debug.print("unprotected for logging\n", .{});
-    const exception_record = exception.ExceptionRecord;
-    const context = exception.ContextRecord;
-    std.debug.print(
-        "excpetion: {x} at {x}\n",
-        .{ exception_record.ExceptionCode, exception_record.ExceptionAddress },
-    );
-    std.debug.print(
-        "died at module: {any}\n",
-        .{global_warden.?.map_address_to_mod(context.Rip).?},
-    );
-    std.debug.print("checking the integrity\n", .{});
-    if (exception_record.ExceptionCode == 0xc0000005) {
-        return win.EXCEPTION_CONTINUE_SEARCH;
-    }
+    _ = exception.ExceptionRecord;
+    _ = exception.ContextRecord;
+    // std.debug.print(
+    //     "excpetion: {x} at {x}\n",
+    //     .{ exception_record.ExceptionCode, exception_record.ExceptionAddress },
+    // );
+    // std.debug.print(
+    //     "died at module: {any}\n",
+    //     .{global_warden.?.map_address_to_mod(context.Rip).?},
+    // );
+    // std.debug.print("checking the integrity\n", .{});
+    // if (exception_record.ExceptionCode == 0xc0000005) {
+    //     return win.EXCEPTION_CONTINUE_SEARCH;
+    // }
     global_warden.?.check_exe_sections() catch {
-        std.debug.print("FAILED at verifying\n", .{});
+        // std.debug.print("FAILED at verifying\n", .{});
     };
-    std.debug.print("supposedly nothing bad was found replaying\n", .{});
+    // std.debug.print("supposedly nothing bad was found replaying\n", .{});
     retry_asm(global_warden.?.callbuff.items[global_warden.?.callbuff.items.len - 1]);
 
     return win.EXCEPTION_CONTINUE_SEARCH;
@@ -485,10 +484,10 @@ pub const warden = struct {
             const sec_header = first_section_header[sec_index];
 
             // If the section has no raw data, skip
-            std.debug.print("Section index: {d}\n", .{sec_index});
+            // std.debug.print("Section index: {d}\n", .{sec_index});
             if (sec_header.SizeOfRawData == 0) continue;
             if (!std.mem.eql(u8, sec_header.Name[0..5], ".text")) {
-                std.debug.print("skipping not text: {s}\n", .{sec_header.Name});
+                // std.debug.print("skipping not text: {s}\n", .{sec_header.Name});
                 continue;
             }
 
@@ -509,7 +508,7 @@ pub const warden = struct {
             // Compare them directly. If they differ, it means the loaded section
             // has been modified or patched since loading.
             if (!std.mem.eql(u8, loaded_sec_slice, disk_sec_slice)) {
-                std.debug.print("bad section \n", .{});
+                // std.debug.print("bad section \n", .{});
                 return error.SectionMismatch;
             }
         }
