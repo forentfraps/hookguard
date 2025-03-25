@@ -35,7 +35,6 @@ pub fn build(b: *std.Build) void {
         std.debug.print("Asm build failed -> {}\n", .{e});
         return;
     };
-    exe.addObjectFile(b.path(".zig-cache\\asm_files\\syscall_wrapper.o"));
     _ = std.process.Child.run(.{
         .argv = &[_][]const u8{
             "nasm",
@@ -50,6 +49,7 @@ pub fn build(b: *std.Build) void {
         std.debug.print("Asm build failed -> {}\n", .{e});
         return;
     };
+    exe.addObjectFile(b.path(".zig-cache\\asm_files\\syscall_wrapper.o"));
     exe.addObjectFile(b.path(".zig-cache\\asm_files\\state_manager.o"));
 
     // This declares intent for the executable to be installed into the
@@ -80,28 +80,38 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
 
-    // Creates a step for unit testing. This only builds the test executable
-    // but does not run it.
-    const lib_unit_tests = b.addTest(.{
-        .root_source_file = b.path("src/root.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
+    const test_step = b.step("test", "Run all tests in ./tests");
 
-    const run_lib_unit_tests = b.addRunArtifact(lib_unit_tests);
+    const tests_dir = std.fs.cwd().openDir("src", .{ .iterate = true }) catch {
+        @panic("NO src DIR");
+    };
+    var it = tests_dir.iterate();
 
-    const exe_unit_tests = b.addTest(.{
-        .root_source_file = b.path("src/main.zig"),
-        .target = target,
-        .optimize = optimize,
-    });
-
-    const run_exe_unit_tests = b.addRunArtifact(exe_unit_tests);
-
-    // Similar to creating the run step earlier, this exposes a `test` step to
-    // the `zig build --help` menu, providing a way for the user to request
-    // running the unit tests.
-    const test_step = b.step("test", "Run unit tests");
-    test_step.dependOn(&run_lib_unit_tests.step);
-    test_step.dependOn(&run_exe_unit_tests.step);
+    while (it.next() catch {
+        @panic("NO TESTS");
+    }) |entry| {
+        if (std.mem.endsWith(u8, entry.name, "test.zig")) {
+            const exe_name = entry.name[0 .. entry.name.len - 4];
+            const source_path = b.path(
+                std.mem.concat(
+                    std.heap.page_allocator,
+                    u8,
+                    &[_][]const u8{ "src/", entry.name },
+                ) catch {
+                    @panic("OOM");
+                },
+            );
+            const test_exe = b.addExecutable(.{
+                .name = exe_name,
+                .target = target,
+                .root_source_file = source_path,
+                .optimize = optimize,
+            });
+            test_exe.addObjectFile(b.path(".zig-cache\\asm_files\\syscall_wrapper.o"));
+            test_exe.addObjectFile(b.path(".zig-cache\\asm_files\\state_manager.o"));
+            const test_exe_run_step = b.addRunArtifact(test_exe);
+            test_exe_run_step.step.dependOn(&test_exe.step);
+            test_step.dependOn(&test_exe_run_step.step);
+        }
+    }
 }

@@ -37,10 +37,7 @@ pub fn MEH_warden(exception: *win.EXCEPTION_POINTERS) callconv(.c) c_long {
     _ = exception.ExceptionRecord;
     _ = exception.ContextRecord;
 
-    global_warden.?.check_exe_sections() catch {
-        // std.debug.print("FAILED at verifying\n", .{});
-    };
-    // std.debug.print("supposedly nothing bad was found replaying\n", .{});
+    global_warden.?.check_exe_sections() catch {};
     retry_asm(global_warden.?.callbuff.items[global_warden.?.callbuff.items.len - 1]);
 
     return win.EXCEPTION_CONTINUE_SEARCH;
@@ -81,7 +78,10 @@ pub const MappedMockSection = struct {
 pub const warden = struct {
     allocator: std.mem.Allocator,
 
+    //contains dynamically allocated pages
     page_map: PageMap = undefined,
+
+    //pages are references from the map
     mod_map: ModuleMap = undefined,
 
     protected: bool = false,
@@ -91,10 +91,15 @@ pub const warden = struct {
     exe_buf: []u8 = undefined,
     sections: []MappedMockSection = undefined,
 
+    ntdll_buffer: [0x11]u8 = undefined,
     ntdll_special_page: usize = undefined,
 
+    //fully on the stack
     syscall_manager: syscall_manager = undefined,
 
+    // callbuff is using FixedBufferAllocator
+    // because reallocation could be used
+    // when protected
     callbuff: std.ArrayList(*const anyopaque) = undefined,
 
     _fba: std.heap.FixedBufferAllocator = undefined,
@@ -102,6 +107,22 @@ pub const warden = struct {
     raw_allocator: std.mem.Allocator = undefined,
 
     const Self = @This();
+
+    pub fn deinit(self: *Self) !void {
+        _ = try self.unprotect_global();
+        try self.unpatch_ntdll();
+        var page_iterator = self.page_map.iterator();
+        while (page_iterator.next()) |entry| {
+            self.allocator.destroy(entry.value_ptr.*);
+        }
+        self.page_map.deinit();
+        self.mod_map.deinit();
+        // self._fba.deinit();
+
+        self.allocator.free(self.exe_buf);
+        self.allocator.free(self.sections);
+        global_warden = null;
+    }
 
     pub fn init(allocator: std.mem.Allocator) !Self {
         var self = Self{ .allocator = allocator };
@@ -176,7 +197,6 @@ pub const warden = struct {
             current_addr = @intFromPtr(mbi.BaseAddress) + mbi.RegionSize;
         }
         self.page_map = pages_map;
-        std.debug.print("Pages in total: {d}\n", .{page_count});
     }
     // Enumerate all loaded modules (the .exe and .dlls) for the local process.
     // For each module, we create an entry in a map keyed by the module name.
@@ -223,13 +243,11 @@ pub const warden = struct {
             };
 
             // Iterate over all pages from the pages_map and add those that fall within this module.
-            // std.debug.print("mod {s} base addr: {x} size {x}\n", .{ modName, baseAddr, modSize });
             var it = self.page_map.iterator();
             while (it.next()) |entry| {
                 const pageAddr = entry.key_ptr.*;
                 if (pageAddr >= baseAddr and pageAddr < baseAddr + modSize) {
                     try moduleInfo.pages.append(entry.value_ptr.*);
-                    // std.debug.print("page baseaddr: -> {x}\n", .{entry.key_ptr.*});
                 }
             }
 
@@ -238,10 +256,6 @@ pub const warden = struct {
             var name_buf = try self.allocator.alloc(u8, name_len);
             std.mem.copyForwards(u8, name_buf, modName);
             const name_slice = name_buf[0..name_len];
-            std.debug.print(
-                "MOdule logged: {s} at {x} with {d} pages\n",
-                .{ modName, moduleInfo.baseAddr, moduleInfo.pages.items.len },
-            );
 
             try modules_map.put(name_slice, moduleInfo);
 
@@ -274,7 +288,6 @@ pub const warden = struct {
         // Here we assume that the module name is also the filename in the current directory.
         // Adjust this as needed if your modules are in a different location.
         const fs = std.fs.cwd();
-        std.debug.print("{s}\n", .{mod_name});
         var file = try fs.openFile(mod_name_full_u8, .{});
         const file_stat = try file.stat();
         const file_size = file_stat.size;
@@ -328,16 +341,13 @@ pub const warden = struct {
                     .ptr = buffer[section.PointerToRawData..].ptr,
                 };
 
-            // std.debug.print("{*} == {*}\n", .{ &(section.Name), section_name_trimmed });
             if (std.mem.eql(u8, section_name_trimmed, ".reloc")) {
                 raw_reloc_ptr = buffer[section.PointerToRawData..].ptr;
-                // std.debug.print("raw_reloc_ptr {*}\n", .{raw_reloc_ptr});
             }
         }
 
         const relocation_table: [*]u8 = raw_reloc_ptr;
         var relocations_processed: u32 = 0;
-        // std.debug.print("virt addr of reloca table: {*}\n", .{relocation_table});
 
         while (relocations_processed < relocations.Size) {
             const relocation_block: *align(1) BASE_RELOCATION_BLOCK =
@@ -352,8 +362,6 @@ pub const warden = struct {
                 if (relocation_entries[entry_index].Type != 0) {
                     const relocation_rva: usize =
                         relocation_block.PageAddress + relocation_entries[entry_index].Offset;
-                    // std.debug.print("address to fix is {x} off the base\n", .{relocation_rva});
-                    //log.info("Value before rva is {x} changing to {*}\n", .{ ptr.*, ptr });
                     var section_pointer: [*]u8 = undefined;
                     var section_offset_virtual: usize = undefined;
                     for (0..self.sections.len) |i| {
@@ -363,13 +371,11 @@ pub const warden = struct {
                         {
                             section_pointer = section.ptr;
                             section_offset_virtual = section.virtual_address;
-                            // std.debug.print("Section rva {s}\n", .{section.name});
                             break;
                         }
                     }
                     const ptr: *align(1) usize =
                         @ptrCast(section_pointer[relocation_rva - section_offset_virtual ..]);
-                    // std.debug.print("{*} - {x}\n", .{ ptr, ptr.* });
                     ptr.* = ptr.* + offset;
 
                     //address_to_patch += offset;
@@ -487,10 +493,8 @@ pub const warden = struct {
             const sec_header = first_section_header[sec_index];
 
             // If the section has no raw data, skip
-            // std.debug.print("Section index: {d}\n", .{sec_index});
             if (sec_header.SizeOfRawData == 0) continue;
             if (!std.mem.eql(u8, sec_header.Name[0..5], ".text")) {
-                // std.debug.print("skipping not text: {s}\n", .{sec_header.Name});
                 continue;
             }
 
@@ -511,13 +515,10 @@ pub const warden = struct {
             // Compare them directly. If they differ, it means the loaded section
             // has been modified or patched since loading.
             if (!std.mem.eql(u8, loaded_sec_slice, disk_sec_slice)) {
-                // std.debug.print("bad section \n", .{});
                 return error.SectionMismatch;
             }
         }
 
-        // If we reach here, all sections matched exactly.
-        // You can return success or print a message as needed.
         return;
     }
 
@@ -528,14 +529,11 @@ pub const warden = struct {
     }
     pub fn deregister_call(self: *Self, callbuf: *const anyopaque) void {
         const ptr = self.callbuff.pop();
-        if (ptr != callbuf) {
-            std.debug.print("tragic... Ptrs did not match during call deregistering\n", .{});
-        }
+        if (ptr != callbuf) {}
         //protection logic
     }
 
     fn change_page_protection(self: *Self, page: *PageInfo, protection: u32) !bool {
-        // std.debug.print("changing page {x} from {x} to {x} prot\n", .{ page.baseAddr, page.access, protection });
         // var obj: OBJECT_ATTRIBUTES = undefined;
         // InitializeObjectAttributes(
         //     &obj,
@@ -565,10 +563,8 @@ pub const warden = struct {
         );
         page.access = protection;
         if (NT_SUCCESS(@intCast(ret_val))) {
-            // std.debug.print("success {x}\n", .{ret_val});
             return true;
         } else {
-            // std.debug.print("failed {x} -> {x}\n", .{ ret_val, win.GetLastError() });
             return false;
         }
     }
@@ -602,7 +598,6 @@ pub const warden = struct {
             if (std.mem.eql(u8, entry.key_ptr.*[key_len - 4 .. key_len], ".exe")) {
                 continue;
             }
-            // std.debug.print("mod: {s}\n", .{entry.key_ptr.*});
 
             for (entry.value_ptr.*.pages.items) |page| {
 
@@ -618,7 +613,6 @@ pub const warden = struct {
             if (std.mem.eql(u8, entry.key_ptr.*[key_len - 4 .. key_len], ".exe")) {
                 continue;
             }
-            // std.debug.print("mod: {s}\n", .{entry.key_ptr.*});
 
             for (entry.value_ptr.*.pages.items) |page| {
 
@@ -644,7 +638,18 @@ pub const warden = struct {
         const page = self.map_address_to_page(@intFromPtr(ntkued)).?;
         self.ntdll_special_page = page.baseAddr;
         _ = try self.change_page_protection(page, win.PAGE_READWRITE);
+        std.mem.copyForwards(u8, self.ntdll_buffer[0..0x11], ntkued[0..0x11]);
         std.mem.copyForwards(u8, ntkued[0..0x11], payload[0..0x11]);
+
+        _ = try self.change_page_protection(page, win.PAGE_EXECUTE_READ);
+    }
+    pub fn unpatch_ntdll(self: *Self) !void {
+        const ntdll = win.kernel32.GetModuleHandleW(W("ntdll.dll")).?;
+        const ntkued: [*]u8 = @ptrCast(win.kernel32.GetProcAddress(ntdll, "KiUserExceptionDispatcher").?);
+        const page = self.map_address_to_page(@intFromPtr(ntkued)).?;
+        self.ntdll_special_page = page.baseAddr;
+        _ = try self.change_page_protection(page, win.PAGE_READWRITE);
+        std.mem.copyForwards(u8, ntkued[0..0x11], self.ntdll_buffer[0..0x11]);
         _ = try self.change_page_protection(page, win.PAGE_EXECUTE_READ);
     }
 
