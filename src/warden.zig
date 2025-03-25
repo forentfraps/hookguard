@@ -4,6 +4,7 @@ const winc = @import("Windows.h.zig");
 const win = std.os.windows;
 const state_manager = @import("state_manager.zig");
 const syscall_manager_lib = @import("syscall_manager.zig");
+const writer_lib = @import("raw_write.zig");
 
 const syscall = syscall_lib.syscall;
 const syscall_manager = syscall_manager_lib.SyscallManager;
@@ -31,21 +32,11 @@ const warder_error = error{
     InvalidNTSignature,
 };
 
-pub fn VEH_warden(exception: *win.EXCEPTION_POINTERS) callconv(.c) c_long {
+pub fn MEH_warden(exception: *win.EXCEPTION_POINTERS) callconv(.c) c_long {
+    // MASTER Exception Handler
     _ = exception.ExceptionRecord;
     _ = exception.ContextRecord;
-    // std.debug.print(
-    //     "excpetion: {x} at {x}\n",
-    //     .{ exception_record.ExceptionCode, exception_record.ExceptionAddress },
-    // );
-    // std.debug.print(
-    //     "died at module: {any}\n",
-    //     .{global_warden.?.map_address_to_mod(context.Rip).?},
-    // );
-    // std.debug.print("checking the integrity\n", .{});
-    // if (exception_record.ExceptionCode == 0xc0000005) {
-    //     return win.EXCEPTION_CONTINUE_SEARCH;
-    // }
+
     global_warden.?.check_exe_sections() catch {
         // std.debug.print("FAILED at verifying\n", .{});
     };
@@ -100,11 +91,15 @@ pub const warden = struct {
     exe_buf: []u8 = undefined,
     sections: []MappedMockSection = undefined,
 
-    ntdll_buf: []u8 = undefined,
+    ntdll_special_page: usize = undefined,
 
     syscall_manager: syscall_manager = undefined,
 
     callbuff: std.ArrayList(*const anyopaque) = undefined,
+
+    _fba: std.heap.FixedBufferAllocator = undefined,
+    _fba_buf: [0x4000]u8 = undefined,
+    raw_allocator: std.mem.Allocator = undefined,
 
     const Self = @This();
 
@@ -113,7 +108,6 @@ pub const warden = struct {
         _ = try self.enumerate_memory();
         _ = try self.enumerate_modules();
         _ = try self.load_initial_exe();
-        self.callbuff = std.ArrayList(*const anyopaque).init(allocator);
         self.syscall_manager = syscall_manager{};
         const ntdll = win.kernel32.GetModuleHandleW(W("ntdll.dll")).?;
 
@@ -121,8 +115,17 @@ pub const warden = struct {
         const ntvmp_syscall = try syscall.fetch(ntpvm);
         const ntop: [*]u8 = @ptrCast(win.kernel32.GetProcAddress(ntdll, "NtOpenProcess").?);
         const ntop_syscall = try syscall.fetch(ntop);
+        const ntwf: [*]u8 = @ptrCast(win.kernel32.GetProcAddress(ntdll, "NtWriteFile").?);
+        const ntwf_syscall = try syscall.fetch(ntwf);
+
         self.syscall_manager.addNTVPM(ntvmp_syscall);
         self.syscall_manager.addNOP(ntop_syscall);
+        self.syscall_manager.addNWF(ntwf_syscall);
+
+        try self.patch_ntdll();
+        self._fba = std.heap.FixedBufferAllocator.init(&self._fba_buf);
+        self.raw_allocator = self._fba.allocator();
+        self.callbuff = std.ArrayList(*const anyopaque).init(self.raw_allocator);
 
         self.init_complete = true;
         return self;
@@ -401,7 +404,7 @@ pub const warden = struct {
     }
 
     /// Given an absolute address, find the page (PageInfo) that contains it.
-    pub fn map_address_to_page(self: *Self, address: usize) ?PageInfo {
+    pub fn map_address_to_page(self: *Self, address: usize) ?*PageInfo {
         var page_iter = self.page_map.iterator();
         while (page_iter.next()) |entry| {
             const page = entry.value_ptr.*;
@@ -570,6 +573,9 @@ pub const warden = struct {
         }
     }
     pub fn protect_page(self: *Self, page: *PageInfo) !bool {
+        if (page.baseAddr == self.ntdll_special_page) {
+            return false;
+        }
         const new_protection = stripExecutionProtection(page.unprotected_access);
         if (new_protection != page.access) {
             return try self.change_page_protection(
@@ -580,6 +586,9 @@ pub const warden = struct {
         return false;
     }
     pub fn unprotect_page(self: *Self, page: *PageInfo) !bool {
+        if (page.baseAddr == self.ntdll_special_page) {
+            return false;
+        }
         return try self.change_page_protection(
             page,
             page.unprotected_access,
@@ -591,8 +600,6 @@ pub const warden = struct {
         while (hash_iterator.next()) |entry| {
             const key_len = entry.key_ptr.*.len;
             if (std.mem.eql(u8, entry.key_ptr.*[key_len - 4 .. key_len], ".exe")) {
-                continue;
-            } else if (std.mem.eql(u8, entry.key_ptr.*, "ntdll.dll")) {
                 continue;
             }
             // std.debug.print("mod: {s}\n", .{entry.key_ptr.*});
@@ -610,8 +617,6 @@ pub const warden = struct {
             const key_len = entry.key_ptr.*.len;
             if (std.mem.eql(u8, entry.key_ptr.*[key_len - 4 .. key_len], ".exe")) {
                 continue;
-            } else if (std.mem.eql(u8, entry.key_ptr.*, "ntdll.dll")) {
-                continue;
             }
             // std.debug.print("mod: {s}\n", .{entry.key_ptr.*});
 
@@ -622,11 +627,49 @@ pub const warden = struct {
             }
         }
     }
-    // prepare_to_scramble_nt
-    // scramble_nt
-    // unscramble_nt_veh
-    // unscramble_nt
-    //
+
+    pub fn patch_ntdll(self: *Self) !void {
+        var payload: [0x11]u8 = .{
+            0xFF, 0x25, 0x00, 0x00, 0x00, 0x00, 0x90, 0x90,
+            0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x0F, 0x05,
+            0xC3,
+        };
+
+        const ptr_to_addr: *align(1) usize = @ptrCast(@as([*]u8, @ptrCast(&payload))[6..]);
+        ptr_to_addr.* = @intFromPtr(&MEH_warden);
+        // const syscall_ptr: [*]u8 = @ptrCast(@as([*]u8, @ptrCast(&payload))[14..]);
+        const ntdll = win.kernel32.GetModuleHandleW(W("ntdll.dll")).?;
+
+        const ntkued: [*]u8 = @ptrCast(win.kernel32.GetProcAddress(ntdll, "KiUserExceptionDispatcher").?);
+        const page = self.map_address_to_page(@intFromPtr(ntkued)).?;
+        self.ntdll_special_page = page.baseAddr;
+        _ = try self.change_page_protection(page, win.PAGE_READWRITE);
+        std.mem.copyForwards(u8, ntkued[0..0x11], payload[0..0x11]);
+        _ = try self.change_page_protection(page, win.PAGE_EXECUTE_READ);
+    }
+
+    pub fn raw_printer(self: *Self, bytes: []const u8) void {
+        //  mov     rax, gs:60h
+        //  mov     rcx, [rax+20h]
+        //  mov     rdi, [rcx+28h]
+        const stdout = asm volatile (".byte 0x65, 0x48, 0x8B, 0x04, 0x25, 0x60, 0x00, 0x00, 0x00, 0x48, 0x8B, 0x48, 0x20, 0x48, 0x8B, 0x79, 0x28\n"
+            : [ret] "={rdi}" (-> usize),
+            :
+            : "rax", "rcx", "rdi"
+        );
+        var io_block: win.IO_STATUS_BLOCK = undefined;
+        _ = self.syscall_manager.NtWriteFile(
+            stdout,
+            0,
+            0,
+            0,
+            &io_block,
+            bytes.ptr,
+            bytes.len,
+            0,
+            0,
+        ) catch return;
+    }
 };
 pub fn stripExecutionProtection(protect: u32) u32 {
     // Assume the lower 8 bits represent the basic protection type.

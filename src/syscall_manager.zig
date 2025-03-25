@@ -15,6 +15,7 @@ pub const SyscallManager = struct {
     _NtVirtualProtectMemorySyscall: ?syscall_wrapper = null,
     _NtVirtualAllocateMemorySyscall: ?syscall_wrapper = null,
     _NtOpenProcessSyscall: ?syscall_wrapper = null,
+    _NtWriteFileSyscall: ?syscall_wrapper = null,
 
     const Self = @This();
 
@@ -26,6 +27,39 @@ pub const SyscallManager = struct {
     pub fn addNOP(self: *Self, _syscall: syscall_wrapper) void {
         self._NtOpenProcessSyscall = _syscall;
         return;
+    }
+
+    pub fn addNWF(self: *Self, _syscall: syscall_wrapper) void {
+        self._NtWriteFileSyscall = _syscall;
+    }
+
+    pub fn NtWriteFile(
+        self: *Self,
+        FileHandle: usize,
+        Event: usize,
+        ApcRoutive: usize,
+        ApcContext: usize,
+        IoStatusBlock: *win.IO_STATUS_BLOCK,
+        Buffer: [*]const u8,
+        Length: usize,
+        ByteOffset: usize,
+        Key: usize,
+    ) !usize {
+        if (self._NtWriteFileSyscall == null) {
+            return syscall_manager_error.SyscallMissing;
+        }
+
+        return self._NtWriteFileSyscall.?.call(.{
+            FileHandle,
+            Event,
+            ApcRoutive,
+            ApcContext,
+            @intFromPtr(IoStatusBlock),
+            @intFromPtr(Buffer),
+            Length,
+            ByteOffset,
+            Key,
+        });
     }
 
     pub fn NtOpenProcess(
