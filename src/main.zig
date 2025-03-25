@@ -28,17 +28,18 @@ pub fn main() !void {
     // std.debug.print("Reprotecting ntdll\n");
     var w = try warden_lib.warden.init(std.heap.page_allocator);
     warden_lib.set_global_warden(&w);
-    // _ = win.kernel32.AddVectoredExceptionHandler(1000, &warden_lib.VEH_warden);
+    _ = win.kernel32.AddVectoredExceptionHandler(1000, &warden_lib.VEH_warden);
     // var n: u32 = 25;
     // const m: u32 = 35;
     //
     // var test_f = CallBuffer(&test_function){};
-    // var test_f2 = CallBuffer(&test_function2){};
+    var test_f2 = CallBuffer(&test_function2){};
     // _ = test_f.call(.{ @intFromPtr(&n), m });
+    _ = test_f2.call(.{ 1, 2, 3, 4, 5 });
     _ = try w.protect_global();
-    // _ = test_f2.call(.{ 1, 2, 3, 4, 5 });
-
     _ = try w.unprotect_global();
+
+    _ = test_f2.call(.{ 1, 2, 3, 4, 5 });
 }
 
 var tries: i8 = 0;

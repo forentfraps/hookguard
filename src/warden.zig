@@ -32,6 +32,7 @@ const warder_error = error{
 };
 
 pub fn VEH_warden(exception: *win.EXCEPTION_POINTERS) callconv(.c) c_long {
+    std.debug.print("unprotected for logging\n", .{});
     const exception_record = exception.ExceptionRecord;
     const context = exception.ContextRecord;
     std.debug.print(
@@ -61,12 +62,12 @@ pub const PageInfo = struct {
     unprotected_access: u32,
 };
 
-const PageMap = std.AutoHashMap(usize, PageInfo);
+const PageMap = std.AutoHashMap(usize, *PageInfo);
 pub const ModuleInfo = struct {
     baseAddr: usize,
     size: usize,
     // A dynamic list of pages that are mapped into this module.
-    pages: std.ArrayList(PageInfo),
+    pages: std.ArrayList(*PageInfo),
 };
 
 const ModuleMap = std.StringHashMap(ModuleInfo);
@@ -130,7 +131,7 @@ pub const warden = struct {
 
     fn enumerate_memory(self: *Self) !void {
         const allocator = self.allocator;
-        var pages_map = std.AutoHashMap(usize, PageInfo).init(allocator);
+        var pages_map = PageMap.init(allocator);
 
         // Retrieve system information to get the address space boundaries.
         var sys_info: win.SYSTEM_INFO = undefined;
@@ -141,6 +142,7 @@ pub const warden = struct {
         // The addresses are represented as numbers for iteration.
         var current_addr: usize = @intFromPtr(sys_info.lpMinimumApplicationAddress);
         const max_addr: usize = @intFromPtr(sys_info.lpMaximumApplicationAddress);
+        const page_size: usize = sys_info.dwPageSize;
 
         while (current_addr < max_addr) {
             var mbi: win.MEMORY_BASIC_INFORMATION = undefined;
@@ -150,17 +152,22 @@ pub const warden = struct {
             if (query_result == 0) break; // No more regions to query
 
             // Check if the region is committed (i.e. allocated).
+
             if (mbi.State == win.MEM_COMMIT) {
-                const key = @intFromPtr(mbi.BaseAddress);
-                const page = PageInfo{
-                    .baseAddr = key,
-                    .regionSize = mbi.RegionSize,
-                    .access = mbi.Protect,
-                    .unprotected_access = mbi.Protect,
-                };
-                // Insert into the hashmap. If the key already exists, this returns an error.
-                try pages_map.put(key, page);
-                page_count += 1;
+                const page_per_block = mbi.RegionSize / page_size;
+                for (0..page_per_block) |i| {
+                    const key = @intFromPtr(mbi.BaseAddress) + page_size * i;
+                    const page = try self.allocator.create(PageInfo);
+                    page.* = PageInfo{
+                        .baseAddr = key,
+                        .regionSize = page_size,
+                        .access = mbi.Protect,
+                        .unprotected_access = mbi.Protect,
+                    };
+                    // Insert into the hashmap. If the key already exists, this returns an error.
+                    try pages_map.put(key, page);
+                    page_count += 1;
+                }
             }
 
             // Move to the next region.
@@ -210,15 +217,17 @@ pub const warden = struct {
             var moduleInfo = ModuleInfo{
                 .baseAddr = baseAddr,
                 .size = modSize,
-                .pages = std.ArrayList(PageInfo).init(self.allocator),
+                .pages = std.ArrayList(*PageInfo).init(self.allocator),
             };
 
             // Iterate over all pages from the pages_map and add those that fall within this module.
+            // std.debug.print("mod {s} base addr: {x} size {x}\n", .{ modName, baseAddr, modSize });
             var it = self.page_map.iterator();
             while (it.next()) |entry| {
                 const pageAddr = entry.key_ptr.*;
                 if (pageAddr >= baseAddr and pageAddr < baseAddr + modSize) {
                     try moduleInfo.pages.append(entry.value_ptr.*);
+                    // std.debug.print("page baseaddr: -> {x}\n", .{entry.key_ptr.*});
                 }
             }
 
@@ -525,36 +534,36 @@ pub const warden = struct {
 
     fn change_page_protection(self: *Self, page: *PageInfo, protection: u32) !bool {
         // std.debug.print("changing page {x} from {x} to {x} prot\n", .{ page.baseAddr, page.access, protection });
-        var obj: OBJECT_ATTRIBUTES = undefined;
-        InitializeObjectAttributes(
-            &obj,
-            null,
-            0,
-            null,
-            null,
-        );
-        var clientId: ClientId = undefined;
-        clientId.UniqueProcess = GetCurrentProcessId();
-        clientId.UniqueThread = 0;
-        var process_handle: usize = undefined;
-        const ProcessHandle = try self.syscall_manager.NtOpenProcess(
-            &process_handle,
-            winc.PROCESS_ALL_ACCESS,
-            &obj,
-            &clientId,
-        );
+        // var obj: OBJECT_ATTRIBUTES = undefined;
+        // InitializeObjectAttributes(
+        //     &obj,
+        //     null,
+        //     0,
+        //     null,
+        //     null,
+        // );
+        // var clientId: ClientId = undefined;
+        // clientId.UniqueProcess = GetCurrentProcessId();
+        // clientId.UniqueThread = 0;
+        // var process_handle: usize = undefined;
+        // const ProcessHandle = try self.syscall_manager.NtOpenProcess(
+        //     &process_handle,
+        //     winc.PROCESS_ALL_ACCESS,
+        //     &obj,
+        //     &clientId,
+        // );
         var old_access: usize = 0;
-        var numberOfByteToProtect: usize = 1024;
+        var numberOfByteToProtect: usize = 0x1000;
         const ret_val = try self.syscall_manager.NtVirtualProtectMemory(
-            ProcessHandle,
+            0xFFFFFFFFFFFFFFFF,
             &page.baseAddr,
             &numberOfByteToProtect,
             protection,
             &old_access,
         );
+        page.access = protection;
         if (NT_SUCCESS(@intCast(ret_val))) {
             // std.debug.print("success {x}\n", .{ret_val});
-            page.access = protection;
             return true;
         } else {
             // std.debug.print("failed {x} -> {x}\n", .{ ret_val, win.GetLastError() });
@@ -572,52 +581,48 @@ pub const warden = struct {
         return false;
     }
     pub fn unprotect_page(self: *Self, page: *PageInfo) !bool {
-        if (page.unprotected_access != page.access) {
-            return try self.change_page_protection(
-                page,
-                page.unprotected_access,
-            );
-        }
-        return false;
+        return try self.change_page_protection(
+            page,
+            page.unprotected_access,
+        );
     }
 
     pub fn protect_global(self: *Self) !void {
-        var hash_iterator = self.mod_map.keyIterator();
-        while (hash_iterator.next()) |key| {
-            const key_len = key.*.len;
-            if (std.mem.eql(u8, key.*[key_len - 4 .. key_len], ".exe")) {
+        var hash_iterator = self.mod_map.iterator();
+        while (hash_iterator.next()) |entry| {
+            const key_len = entry.key_ptr.*.len;
+            if (std.mem.eql(u8, entry.key_ptr.*[key_len - 4 .. key_len], ".exe")) {
                 continue;
-            } else if (std.mem.eql(u8, key.*, "ntdll.dll")) {
+            } else if (std.mem.eql(u8, entry.key_ptr.*, "ntdll.dll")) {
                 continue;
             }
-            // std.debug.print("mod: {s}\n", .{key.*});
+            // std.debug.print("mod: {s}\n", .{entry.key_ptr.*});
 
-            var page_iterator = self.page_map.keyIterator();
-            while (page_iterator.next()) |page_key| {
+            for (entry.value_ptr.*.pages.items) |page| {
+
                 // well... the constCast is an interesting choice
-                const page = @constCast(self.page_map.getPtr(page_key.*).?);
                 _ = try self.protect_page(page);
             }
         }
     }
     pub fn unprotect_global(self: *Self) !void {
-        var hash_iterator = self.mod_map.keyIterator();
-        while (hash_iterator.next()) |key| {
-            const key_len = key.*.len;
-            if (std.mem.eql(u8, key.*[key_len - 4 .. key_len], ".exe")) {
+        var hash_iterator = self.mod_map.iterator();
+        while (hash_iterator.next()) |entry| {
+            const key_len = entry.key_ptr.*.len;
+            if (std.mem.eql(u8, entry.key_ptr.*[key_len - 4 .. key_len], ".exe")) {
                 continue;
-            } else if (std.mem.eql(u8, key.*, "ntdll.dll")) {
+            } else if (std.mem.eql(u8, entry.key_ptr.*, "ntdll.dll")) {
                 continue;
             }
+            // std.debug.print("mod: {s}\n", .{entry.key_ptr.*});
 
-            var page_iterator = self.page_map.keyIterator();
-            while (page_iterator.next()) |page_key| {
-                const page = @constCast(self.page_map.getPtr(page_key.*).?);
+            for (entry.value_ptr.*.pages.items) |page| {
+
+                // well... the constCast is an interesting choice
                 _ = try self.unprotect_page(page);
             }
         }
     }
-
     // prepare_to_scramble_nt
     // scramble_nt
     // unscramble_nt_veh
