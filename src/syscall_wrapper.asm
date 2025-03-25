@@ -19,17 +19,19 @@ syscall_wrapper:
     jmp .push_args
 .populate_registers:
     mov r12, rdx
+    push rax
     xor rax, rax
-    mov r10, [rsp]
-    mov rdx, [rsp + 8]
-    mov r8, [rsp + 16]
-    mov r9, [rsp + 24]
+    mov r10, [rsp + 8]
+    mov rdx, [rsp + 16]
+    mov r8, [rsp + 24]
+    mov r9, [rsp + 32]
 .do_syscall:
     mov rax, r11
     syscall
 
 .epilogue:
     lea rcx, [r12 * 8]
+    pop rdx
     add rsp, rcx
     pop r12
     ret

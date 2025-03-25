@@ -33,6 +33,8 @@ pub fn main() !void {
 
     var test_f = state_manager.CallBuffer(&test_function){};
     _ = test_f.call(.{ @intFromPtr(&n), m });
+    _ = try w.protect_global();
+    _ = try w.unprotect_global();
 }
 
 var tries: i8 = 0;

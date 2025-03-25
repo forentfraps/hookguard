@@ -14,7 +14,7 @@ const syscall_manager_error = error{
 pub const SyscallManager = struct {
     _NtVirtualProtectMemorySyscall: ?syscall_wrapper = null,
     _NtVirtualAllocateMemorySyscall: ?syscall_wrapper = null,
-    _NtOpenProcess: ?syscall_wrapper = null,
+    _NtOpenProcessSyscall: ?syscall_wrapper = null,
 
     const Self = @This();
 
@@ -24,7 +24,7 @@ pub const SyscallManager = struct {
     }
 
     pub fn addNOP(self: *Self, _syscall: syscall_wrapper) void {
-        self._NtOpenProcess = _syscall;
+        self._NtOpenProcessSyscall = _syscall;
         return;
     }
 
@@ -32,38 +32,38 @@ pub const SyscallManager = struct {
         self: *Self,
         ProcessHandle: *usize,
         DesiredAcess: usize,
-        ObjectAttributes: *win.OBJECT_ATTRIBUTES,
-        ClientId: usize,
-    ) !win.NTSTATUS {
-        if (self._NtOpenProcess == null) {
+        ObjectAttributes: *anyopaque,
+        ClientId: *anyopaque,
+    ) !usize {
+        if (self._NtOpenProcessSyscall == null) {
             return syscall_manager_error.SyscallMissing;
         }
 
-        return self._NtpOpenProcess.call(.{
-            ProcessHandle,
+        return self._NtOpenProcessSyscall.?.call(.{
+            @intFromPtr(ProcessHandle),
             DesiredAcess,
-            ObjectAttributes,
-            ClientId,
+            @intFromPtr(ObjectAttributes),
+            @intFromPtr(ClientId),
         });
     }
 
     pub fn NtVirtualProtectMemory(
         self: *Self,
-        ProcessHandle: usize,
-        BaseAddress: [*]u8,
+        _: usize,
+        BaseAddress: usize,
         NumberOfBytesToProtect: *usize,
         NewAccessProtection: usize,
         OldAccessProtection: *usize,
-    ) !win.NTSTATUS {
+    ) !usize {
         if (self._NtVirtualProtectMemorySyscall == null) {
             return syscall_manager_error.SyscallMissing;
         }
-        return self._NtVirtualProtectMemory.call(.{
-            ProcessHandle,
+        return self._NtVirtualProtectMemorySyscall.?.call(.{
+            0xFFFFFFFFFFFFFFFF,
             BaseAddress,
-            NumberOfBytesToProtect,
+            @intFromPtr(NumberOfBytesToProtect),
             NewAccessProtection,
-            OldAccessProtection,
+            @intFromPtr(OldAccessProtection),
         });
     }
 
@@ -74,15 +74,15 @@ pub const SyscallManager = struct {
         RegionSize: *usize,
         AllocationType: usize,
         Protect: usize,
-    ) !win.NTSTATUS {
+    ) !usize {
         if (self._NtVirtualAllocateMemorySyscall == null) {
             return syscall_manager_error.SyscallMissing;
         }
 
-        return self._NtVirtualAllocateMemorySyscall.call(.{
-            BaseAddress,
+        return self._NtVirtualAllocateMemorySyscall.?.call(.{
+            @intFromPtr(BaseAddress),
             ZeroBits,
-            RegionSize,
+            @intFromPtr(RegionSize),
             AllocationType,
             Protect,
         });

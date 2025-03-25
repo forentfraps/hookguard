@@ -8,6 +8,7 @@ const syscall_manager_lib = @import("syscall_manager.zig");
 const syscall = syscall_lib.syscall;
 const syscall_manager = syscall_manager_lib.SyscallManager;
 const W = std.unicode.utf8ToUtf16LeStringLiteral;
+const Walloc = std.unicode.utf8ToUtf16LeAllocZ;
 
 extern fn retry_asm(*const anyopaque) void;
 
@@ -16,6 +17,11 @@ pub var global_warden: ?*warden = null;
 pub fn set_global_warden(w: *warden) void {
     global_warden = w;
 }
+
+const ClientId = struct {
+    UniqueProcess: usize,
+    UniqueThread: usize,
+};
 
 const warder_error = error{
     SnapshotFail,
@@ -109,6 +115,14 @@ pub const warden = struct {
         _ = try self.load_initial_exe();
         self.callbuff = std.ArrayList(*const anyopaque).init(allocator);
         self.syscall_manager = syscall_manager{};
+        const ntdll = win.kernel32.GetModuleHandleW(W("ntdll.dll")).?;
+
+        const ntpvm: [*]u8 = @ptrCast(win.kernel32.GetProcAddress(ntdll, "ZwProtectVirtualMemory").?);
+        const ntvmp_syscall = try syscall.fetch(ntpvm);
+        const ntop: [*]u8 = @ptrCast(win.kernel32.GetProcAddress(ntdll, "NtOpenProcess").?);
+        const ntop_syscall = try syscall.fetch(ntop);
+        self.syscall_manager.addNTVPM(ntvmp_syscall);
+        self.syscall_manager.addNOP(ntop_syscall);
 
         self.init_complete = true;
         return self;
@@ -510,7 +524,8 @@ pub const warden = struct {
     }
 
     fn change_page_protection(self: *Self, page: *PageInfo, protection: u32) !bool {
-        var obj: win.OBJECT_ATTRIBUTES = undefined;
+        // std.debug.print("changing page {x} from {x} to {x} prot\n", .{ page.baseAddr, page.access, protection });
+        var obj: OBJECT_ATTRIBUTES = undefined;
         InitializeObjectAttributes(
             &obj,
             null,
@@ -518,7 +533,7 @@ pub const warden = struct {
             null,
             null,
         );
-        var clientId: win.CLIENT_ID = undefined;
+        var clientId: ClientId = undefined;
         clientId.UniqueProcess = GetCurrentProcessId();
         clientId.UniqueThread = 0;
         var process_handle: usize = undefined;
@@ -529,53 +544,65 @@ pub const warden = struct {
             &clientId,
         );
         var old_access: usize = 0;
+        var numberOfByteToProtect = page.regionSize;
         const ret_val = try self.syscall_manager.NtVirtualProtectMemory(
             ProcessHandle,
             page.baseAddr,
-            page.regionSize,
+            &numberOfByteToProtect,
             protection,
             &old_access,
         );
-        if (NT_SUCCESS(ret_val)) {
+        if (NT_SUCCESS(@intCast(ret_val))) {
+            // std.debug.print("success {x}\n", .{ret_val});
             page.access = protection;
             return true;
         } else {
+            // std.debug.print("failed {x} -> {x}\n", .{ ret_val, win.GetLastError() });
             return false;
         }
     }
     pub fn protect_page(self: *Self, page: *PageInfo) !bool {
-        return try self.change_page_protection(
-            &page,
-            stripExecutionProtection(page.unprotected_access),
-        );
+        const new_protection = stripExecutionProtection(page.unprotected_access);
+        if (new_protection != page.access) {
+            return try self.change_page_protection(
+                page,
+                new_protection,
+            );
+        }
+        return false;
     }
     pub fn unprotect_page(self: *Self, page: *PageInfo) !bool {
-        return try self.change_page_protection(
-            &page,
-            page.unprotected_access,
-        );
+        if (page.unprotected_access != page.access) {
+            return try self.change_page_protection(
+                page,
+                page.unprotected_access,
+            );
+        }
+        return false;
     }
 
-    pub fn protect_global(self: *Self) bool {
-        var hash_iterator = self.module_map.keyIterator();
-        for (hash_iterator.next()) |key| {
+    pub fn protect_global(self: *Self) !void {
+        var hash_iterator = self.mod_map.keyIterator();
+        while (hash_iterator.next()) |key| {
             const key_len = key.*.len;
             if (std.mem.eql(u8, key.*[key_len - 4 .. key_len], ".exe")) {
                 continue;
             } else if (std.mem.eql(u8, key.*, "ntdll.dll")) {
                 continue;
             }
+            // std.debug.print("mod: {s}\n", .{key.*});
 
             var page_iterator = self.page_map.keyIterator();
-            for (page_iterator.next()) |page_key| {
-                const page = self.page_map.get(page_key.*);
-                self.protect_page(page);
+            while (page_iterator.next()) |page_key| {
+                // well... the constCast is an interesting choice
+                const page = @constCast(self.page_map.getPtr(page_key.*).?);
+                _ = try self.protect_page(page);
             }
         }
     }
-    pub fn unprotect_global(self: *Self) bool {
-        var hash_iterator = self.module_map.keyIterator();
-        for (hash_iterator.next()) |key| {
+    pub fn unprotect_global(self: *Self) !void {
+        var hash_iterator = self.mod_map.keyIterator();
+        while (hash_iterator.next()) |key| {
             const key_len = key.*.len;
             if (std.mem.eql(u8, key.*[key_len - 4 .. key_len], ".exe")) {
                 continue;
@@ -584,9 +611,9 @@ pub const warden = struct {
             }
 
             var page_iterator = self.page_map.keyIterator();
-            for (page_iterator.next()) |page_key| {
-                const page = self.page_map.get(page_key.*);
-                self.unprotect_page(page);
+            while (page_iterator.next()) |page_key| {
+                const page = @constCast(self.page_map.getPtr(page_key.*).?);
+                _ = try self.unprotect_page(page);
             }
         }
     }
@@ -601,7 +628,8 @@ pub fn stripExecutionProtection(protect: u32) u32 {
     // Assume the lower 8 bits represent the basic protection type.
     const basic = protect & 0xFF;
     // Preserve any modifiers (flags above the lower 8 bits).
-    const modifiers = protect & ~0xFF;
+    const mask: u8 = 0xFF;
+    const modifiers = protect & ~mask;
     const newBasic: u32 = switch (basic) {
         win.PAGE_EXECUTE => win.PAGE_READONLY,
         win.PAGE_EXECUTE_READ => win.PAGE_READONLY,
@@ -611,7 +639,9 @@ pub fn stripExecutionProtection(protect: u32) u32 {
     };
     return newBasic | modifiers;
 }
-fn NT_SUCCESS(status: winc.NTSTATUS) bool {
+fn NT_SUCCESS(_status: usize) bool {
+    const status: u32 = @intCast(_status & 0xFF_FF_FF_FF);
+
     return (status > 0 and status < 0x3FFFFFFF) or
         (status > 0x40000000 and status < 0x7FFFFFFF);
 }
@@ -619,16 +649,20 @@ fn NT_SUCCESS(status: winc.NTSTATUS) bool {
 fn is_page_executable(access: u32) bool {
     // These are example Windows page protection constants.
     // Adjust them if your definitions differ.
-    const PAGE_EXECUTE = 0x10;
-    const PAGE_EXECUTE_READ = 0x20;
-    const PAGE_EXECUTE_READWRITE = 0x40;
-    const PAGE_EXECUTE_WRITECOPY = 0x80;
-    return access == PAGE_EXECUTE or access == PAGE_EXECUTE_READ or
-        access == PAGE_EXECUTE_READWRITE or access == PAGE_EXECUTE_WRITECOPY;
+    return access == win.PAGE_EXECUTE or access == win.PAGE_EXECUTE_READ or
+        access == win.PAGE_EXECUTE_READWRITE or access == win.PAGE_EXECUTE_WRITECOPY;
 }
+const OBJECT_ATTRIBUTES = struct {
+    Length: usize,
+    RootDirectory: ?*anyopaque,
+    ObjectName: ?*win.UNICODE_STRING,
+    Attributes: usize,
+    SecurityDescriptor: ?*anyopaque,
+    SecurityQualityOfService: ?*anyopaque,
+};
 fn InitializeObjectAttributes(
-    attrs: *win.OBJECT_ATTRIBUTES,
-    name: ?*u8,
+    attrs: *OBJECT_ATTRIBUTES,
+    name: ?*win.UNICODE_STRING,
     attributes: u32,
     rootDir: ?*void,
     securityDescriptor: ?*void,
@@ -640,9 +674,25 @@ fn InitializeObjectAttributes(
     attrs.SecurityDescriptor = securityDescriptor;
     attrs.SecurityQualityOfService = null;
 }
+pub fn createUnicodeString(allocator: *std.mem.Allocator, s: []const u8) !win.UNICODE_STRING {
+    // Convert and allocate a null-terminated UTF-16 LE version of the input.
+    const wide = try Walloc(allocator, s);
+    // `wide` is a slice of u16 including the terminating 0.
+    // Calculate the length in bytes excluding the null terminator.
+    const count = wide.len - 1;
+    return win.UNICODE_STRING{
+        .Length = @intCast(count * 2),
+        .MaximumLength = @intCast(wide.len * 2),
+        .Buffer = wide.ptr, // Get pointer to the first u16 element.
+    };
+}
 
-fn GetCurrentProcessId() u32 {
-    return asm volatile ("mov rax, gs:30h\nmov eax, [rax + 0x40]\n"
+fn GetCurrentProcessId() usize {
+    // fun fact, mov eax, <anything> clears high 32 bits of rax
+    //0:  65 48 8b 04 25 30 00    mov    rax,QWORD PTR gs:0x30
+    //7:  00 00
+    //9:  8b 40 40                mov    eax,DWORD PTR [rax+0x40]
+    return asm volatile (".byte 0x65, 0x48, 0x8B, 0x04, 0x25, 0x30, 0x00, 0x00, 0x00, 0x8B, 0x40, 0x40 \n"
         : [ret] "={rax}" (-> usize),
         :
         : "rax"
