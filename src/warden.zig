@@ -544,10 +544,10 @@ pub const warden = struct {
             &clientId,
         );
         var old_access: usize = 0;
-        var numberOfByteToProtect = page.regionSize;
+        var numberOfByteToProtect: usize = 1024;
         const ret_val = try self.syscall_manager.NtVirtualProtectMemory(
             ProcessHandle,
-            page.baseAddr,
+            &page.baseAddr,
             &numberOfByteToProtect,
             protection,
             &old_access,

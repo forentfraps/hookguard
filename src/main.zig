@@ -7,6 +7,7 @@ const warden_lib = @import("warden.zig");
 const syscall = syscall_lib.syscall;
 const W = std.unicode.utf8ToUtf16LeStringLiteral;
 const state_manager = @import("state_manager.zig");
+const CallBuffer = state_manager.CallBuffer;
 
 pub fn main() !void {
     const ntdll = win.kernel32.GetModuleHandleW(W("ntdll.dll")).?;
@@ -27,13 +28,16 @@ pub fn main() !void {
     // std.debug.print("Reprotecting ntdll\n");
     var w = try warden_lib.warden.init(std.heap.page_allocator);
     warden_lib.set_global_warden(&w);
-    _ = win.kernel32.AddVectoredExceptionHandler(1000, &warden_lib.VEH_warden);
-    var n: u32 = 25;
-    const m: u32 = 35;
-
-    var test_f = state_manager.CallBuffer(&test_function){};
-    _ = test_f.call(.{ @intFromPtr(&n), m });
+    // _ = win.kernel32.AddVectoredExceptionHandler(1000, &warden_lib.VEH_warden);
+    // var n: u32 = 25;
+    // const m: u32 = 35;
+    //
+    // var test_f = CallBuffer(&test_function){};
+    // var test_f2 = CallBuffer(&test_function2){};
+    // _ = test_f.call(.{ @intFromPtr(&n), m });
     _ = try w.protect_global();
+    // _ = test_f2.call(.{ 1, 2, 3, 4, 5 });
+
     _ = try w.unprotect_global();
 }
 
@@ -47,4 +51,8 @@ pub fn test_function(x: *u32, y: u32) callconv(.C) void {
     }
     std.debug.print("x is {d}\n", .{x.*});
     std.debug.print("y is {d}\n", .{y});
+}
+
+pub fn test_function2(a: u32, b: u32, c: u32, d: u32, e: u32) callconv(.C) void {
+    std.debug.print("function2 - {d} {d} {d} {d} {d}\n", .{ a, b, c, d, e });
 }

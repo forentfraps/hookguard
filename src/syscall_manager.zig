@@ -50,7 +50,7 @@ pub const SyscallManager = struct {
     pub fn NtVirtualProtectMemory(
         self: *Self,
         _: usize,
-        BaseAddress: usize,
+        PBaseAddress: *usize,
         NumberOfBytesToProtect: *usize,
         NewAccessProtection: usize,
         OldAccessProtection: *usize,
@@ -60,7 +60,7 @@ pub const SyscallManager = struct {
         }
         return self._NtVirtualProtectMemorySyscall.?.call(.{
             0xFFFFFFFFFFFFFFFF,
-            BaseAddress,
+            @intFromPtr(PBaseAddress),
             @intFromPtr(NumberOfBytesToProtect),
             NewAccessProtection,
             @intFromPtr(OldAccessProtection),
