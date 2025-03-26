@@ -30,16 +30,14 @@ While still under development, you can expect these core modules:
 
 ## Prerequisites
 - **Windows x86_64** platform
-- **Zig** compiler (recommended 0.10+)
-- **MASM** or **NASM** for assembling `.asm` code
-- Administrative privileges if modifying certain memory regions
+- **Zig** compiler (recommended 0.15+)
+- **NASM** for assembling `.asm` code
 
 ## Building
-1. Assemble the `.asm` files, for example:
-   nasm -f win64 syscall_wrapper.asm -o syscall_wrapper.obj
-2. Compile your Zig code and link against the object files. If using a `build.zig`, run:
-   zig build
-3. Check for the executable in `zig-out/bin` (or your configured output directory).
+- Run `zig build run`
+
+## Testing
+- Run `zig build test`
 
 ## Usage
 1. **Initialize HookGuard**  
