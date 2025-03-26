@@ -48,11 +48,9 @@ While still under development, you can expect these core modules:
    - On crash, HookGuard patches altered pages and replays the last function call.
 
 ## Current Status & Roadmap
-- **Status**: Still a prototype focusing on proof-of-concept. Tests are ongoing, and more robust handling of Windows-specific edge cases is planned.
+- **Dll**: Integrate it as a dll, to be able to dynamically load it, not sure why for now, but some benefits reside there
 - **Future Plans**:
-  - Improved hooking detection
-  - Enhanced exception handling using SEH or vectored exception handlers
-  - Broader support for dynamically loaded modules
+  - Improved hooking detection (parse the stack/call trace and see exactly where the hook resides
 
 ## Contributing
 Contributions are welcome! If you have ideas or bug fixes:
