@@ -90,6 +90,7 @@ pub const warden = struct {
 
     exe_buf: []u8 = undefined,
     sections: []MappedMockSection = undefined,
+    current_mod: usize = undefined,
 
     ntdll_buffer: [0x11]u8 = undefined,
     ntdll_special_page: usize = undefined,
@@ -147,6 +148,8 @@ pub const warden = struct {
         self._fba = std.heap.FixedBufferAllocator.init(&self._fba_buf);
         self.raw_allocator = self._fba.allocator();
         self.callbuff = std.ArrayList(*const anyopaque).init(self.raw_allocator);
+
+        self.get_current_mod();
 
         self.init_complete = true;
         return self;
@@ -266,19 +269,21 @@ pub const warden = struct {
         self.mod_map = modules_map;
         return;
     }
+
+    pub fn get_current_mod(self: *Self) void {
+        const modinfo = self.map_address_to_mod(@intFromPtr(&get_current_mod)).?;
+        self.current_mod = modinfo.baseAddr;
+    }
+
     fn load_initial_exe(self: *Self) !void {
         // Check that the module exists in our modules map.
-        var map_iterator = self.mod_map.keyIterator();
+        var map_iterator = self.mod_map.iterator();
         var mod_name: []const u8 = undefined;
         var base_addr: usize = undefined;
-        while (true) {
-            if (map_iterator.next()) |key| {
-                mod_name = key.*;
-                if (std.mem.eql(u8, mod_name[mod_name.len - 4 ..], ".exe")) {
-                    base_addr = self.mod_map.get(key.*).?.baseAddr;
-                    break;
-                }
-            } else {
+        while (map_iterator.next()) |entry| {
+            mod_name = entry.key_ptr.*;
+            if (entry.value_ptr.*.baseAddr == self.current_mod) {
+                base_addr = entry.value_ptr.*.baseAddr;
                 break;
             }
         }
@@ -438,14 +443,12 @@ pub const warden = struct {
 
     pub fn check_exe_sections(self: *Self) !void {
         // 1) Find the .exe entry from our mod_map.
-        var exe_key: []const u8 = undefined;
         var exe_module: ModuleInfo = undefined;
 
-        var key_iter = self.mod_map.keyIterator();
-        while (key_iter.next()) |key| {
-            if (std.mem.eql(u8, key.*[key.*.len - 4 ..], ".exe")) {
-                exe_key = key.*;
-                exe_module = self.mod_map.get(key.*) orelse continue;
+        var key_iter = self.mod_map.iterator();
+        while (key_iter.next()) |entry| {
+            if (entry.value_ptr.*.baseAddr == self.current_mod) {
+                exe_module = entry.value_ptr.*;
                 break;
             }
         }
@@ -594,8 +597,7 @@ pub const warden = struct {
     pub fn protect_global(self: *Self) !void {
         var hash_iterator = self.mod_map.iterator();
         while (hash_iterator.next()) |entry| {
-            const key_len = entry.key_ptr.*.len;
-            if (std.mem.eql(u8, entry.key_ptr.*[key_len - 4 .. key_len], ".exe")) {
+            if (entry.value_ptr.*.baseAddr == self.current_mod) {
                 continue;
             }
 
