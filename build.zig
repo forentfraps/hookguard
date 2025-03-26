@@ -40,6 +40,20 @@ pub fn build(b: *std.Build) void {
             "nasm",
             "-f",
             "win64",
+            "src\\warden.asm",
+            "-o",
+            ".zig-cache\\asm_files\\warden_asm.o",
+        },
+        .allocator = std.heap.page_allocator,
+    }) catch |e| {
+        std.debug.print("Asm build failed -> {}\n", .{e});
+        return;
+    };
+    _ = std.process.Child.run(.{
+        .argv = &[_][]const u8{
+            "nasm",
+            "-f",
+            "win64",
             "src\\state_manager.asm",
             "-o",
             ".zig-cache\\asm_files\\state_manager.o",
@@ -51,6 +65,7 @@ pub fn build(b: *std.Build) void {
     };
     exe.addObjectFile(b.path(".zig-cache\\asm_files\\syscall_wrapper.o"));
     exe.addObjectFile(b.path(".zig-cache\\asm_files\\state_manager.o"));
+    exe.addObjectFile(b.path(".zig-cache\\asm_files\\warden_asm.o"));
 
     // This declares intent for the executable to be installed into the
     // standard location when the user invokes the "install" step (the default
@@ -109,6 +124,7 @@ pub fn build(b: *std.Build) void {
             });
             test_exe.addObjectFile(b.path(".zig-cache\\asm_files\\syscall_wrapper.o"));
             test_exe.addObjectFile(b.path(".zig-cache\\asm_files\\state_manager.o"));
+            test_exe.addObjectFile(b.path(".zig-cache\\asm_files\\warden_asm.o"));
             const test_exe_run_step = b.addRunArtifact(test_exe);
             test_exe_run_step.step.dependOn(&test_exe.step);
             test_step.dependOn(&test_exe_run_step.step);

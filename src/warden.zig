@@ -32,10 +32,21 @@ const warder_error = error{
     InvalidNTSignature,
 };
 
-pub fn MEH_warden(exception: *win.EXCEPTION_POINTERS) callconv(.c) c_long {
+const print = @import("raw_write.zig").customPrint;
+
+extern fn _MEH_warden_asm() callconv(.C) void;
+
+comptime {
+    @export(&MEH_warden, .{
+        .name = "MEH_warden",
+        .linkage = .strong,
+    });
+}
+pub fn MEH_warden(er: *win.EXCEPTION_RECORD, _: *win.CONTEXT) callconv(.c) c_long {
     // MASTER Exception Handler
-    _ = exception.ExceptionRecord;
-    _ = exception.ContextRecord;
+    //0x48, 0x8D, 0x84, 0x24, 0xF0, 0x04, 0x00, 0x00, 0x48, 0x8D, 0x0C, 0x24
+
+    print("Excpetion occured: {x} - {*}\n", .{ er.ExceptionCode, er.ExceptionAddress }) catch return winc.EXCEPTION_CONTINUE_SEARCH;
 
     global_warden.?.check_exe_sections() catch {};
     retry_asm(global_warden.?.callbuff.items[global_warden.?.callbuff.items.len - 1]);
@@ -632,7 +643,7 @@ pub const warden = struct {
         };
 
         const ptr_to_addr: *align(1) usize = @ptrCast(@as([*]u8, @ptrCast(&payload))[6..]);
-        ptr_to_addr.* = @intFromPtr(&MEH_warden);
+        ptr_to_addr.* = @intFromPtr(&_MEH_warden_asm);
         // const syscall_ptr: [*]u8 = @ptrCast(@as([*]u8, @ptrCast(&payload))[14..]);
         const ntdll = win.kernel32.GetModuleHandleW(W("ntdll.dll")).?;
 
