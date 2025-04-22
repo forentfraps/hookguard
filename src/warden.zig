@@ -1,15 +1,15 @@
 const std = @import("std");
-const syscall_lib = @import("syscall_wrapper.zig");
 const winc = @import("Windows.h.zig");
 const win = std.os.windows;
 const state_manager = @import("state_manager.zig");
-const syscall_manager_lib = @import("syscall_manager.zig");
+const syscall_manager_lib = @import("syscall_manager");
 const writer_lib = @import("raw_write.zig");
 
-const syscall = syscall_lib.syscall;
+const syscall = syscall_manager_lib.syscall;
 const syscall_manager = syscall_manager_lib.SyscallManager;
 const W = std.unicode.utf8ToUtf16LeStringLiteral;
 const Walloc = std.unicode.utf8ToUtf16LeAllocZ;
+const print = @import("raw_write.zig").customPrint;
 
 extern fn retry_asm(*const anyopaque) void;
 
@@ -31,8 +31,6 @@ const warder_error = error{
     InvalidDOSHeader,
     InvalidNTSignature,
 };
-
-const print = @import("raw_write.zig").customPrint;
 
 extern fn _MEH_warden_asm() callconv(.C) void;
 

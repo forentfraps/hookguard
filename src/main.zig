@@ -1,10 +1,7 @@
 const std = @import("std");
-const syscall_lib = @import("syscall_wrapper.zig");
 const winc = @import("Windows.h.zig");
 const win = std.os.windows;
 const warden_lib = @import("warden.zig");
-
-const syscall = syscall_lib.syscall;
 const W = std.unicode.utf8ToUtf16LeStringLiteral;
 const state_manager = @import("state_manager.zig");
 const CallBuffer = state_manager.CallBuffer;

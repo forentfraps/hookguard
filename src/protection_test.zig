@@ -1,10 +1,8 @@
 const std = @import("std");
-const syscall_lib = @import("syscall_wrapper.zig");
 const warden_lib = @import("warden.zig");
 const print = @import("raw_write.zig").customPrint;
 const state_manager = @import("state_manager.zig");
 
-const syscall = syscall_lib.syscall;
 const CallBuffer = state_manager.CallBuffer;
 
 var test_function2_counter: u32 = 0;
