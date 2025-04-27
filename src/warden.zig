@@ -126,6 +126,11 @@ pub const warden = struct {
             self.allocator.destroy(entry.value_ptr.*);
         }
         self.page_map.deinit();
+        var mod_iterator = self.mod_map.iterator();
+        while (mod_iterator.next()) |entry| {
+            entry.value_ptr.pages.deinit();
+            self.allocator.free(entry.key_ptr.*);
+        }
         self.mod_map.deinit();
         // self._fba.deinit();
 
@@ -299,6 +304,7 @@ pub const warden = struct {
         var mod_name_full: [256]u16 = undefined;
         const mod_name_return: []u16 = @ptrCast(try win.GetModuleFileNameW(null, &mod_name_full, 256));
         const mod_name_full_u8: []u8 = try std.unicode.utf16LeToUtf8Alloc(self.allocator, mod_name_return);
+        defer self.allocator.free(mod_name_full_u8);
         // Here we assume that the module name is also the filename in the current directory.
         // Adjust this as needed if your modules are in a different location.
         const fs = std.fs.cwd();

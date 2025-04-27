@@ -17,7 +17,9 @@ pub fn test_function(x: *u32, y: u32) callconv(.C) void {
 }
 
 pub fn main() !void {
-    var w = try warden_lib.warden.init(std.heap.page_allocator);
+    var gpa = std.heap.DebugAllocator(.{}){};
+    const allocator = gpa.allocator();
+    var w = try warden_lib.warden.init(allocator);
     warden_lib.set_global_warden(&w);
     var n: u32 = 25;
     const m: u32 = 35;
@@ -26,4 +28,5 @@ pub fn main() !void {
     _ = test_f.call(.{ @intFromPtr(&n), m });
     try w.deinit();
     std.debug.print("Sucess - asm_replay\n", .{});
+    _ = gpa.detectLeaks();
 }

@@ -15,7 +15,10 @@ pub fn test_function2(a: u32, b: u32, c: u32, d: u32, e: u32) callconv(.C) void 
 }
 
 pub fn main() !void {
-    var w = try warden_lib.warden.init(std.heap.page_allocator);
+    var gpa = std.heap.DebugAllocator(.{}){};
+    const allocator = gpa.allocator();
+
+    var w = try warden_lib.warden.init(allocator);
     warden_lib.set_global_warden(&w);
     var test_f2 = CallBuffer(&test_function2){};
     _ = try w.protect_global();
@@ -28,4 +31,5 @@ pub fn main() !void {
     try w.deinit();
 
     std.debug.print("Sucess - protection\n", .{});
+    _ = gpa.detectLeaks();
 }
