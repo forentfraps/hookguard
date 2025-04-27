@@ -25,7 +25,7 @@
     // internet connectivity.
     .dependencies = .{
         .syscall_manager = .{
-            .path = "../syscall_manager",
+            .path = "deps/syscall_manager",
         },
         // See `zig fetch --save <url>` for a command-line interface for adding dependencies.
         //.example = .{
