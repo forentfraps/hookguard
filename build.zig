@@ -6,8 +6,11 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
     const target = b.standardTargetOptions(.{});
-    const syscall_dep = b.dependency("syscall_manager", .{ .target = target, .optimize = optimize });
+    const syscall_dep = b.dependency("syscall_manager", .{});
     const syscall_module = syscall_dep.module("syscall_manager");
+
+    const syslogger_dep = b.dependency("sys_logger", .{});
+    const syslogger_module = syslogger_dep.module("sys_logger");
 
     // Standard optimization options allow the person running `zig build` to select
     // between Debug, ReleaseSafe, ReleaseFast, and ReleaseSmall. Here we do not
@@ -22,10 +25,13 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     exe_mod.addImport("syscall_manager", syscall_module);
+    exe_mod.addImport("sys_logger", syslogger_module);
     const exe = b.addExecutable(.{
         .name = "hookguard",
         .root_module = exe_mod,
     });
+    exe.addObjectFile(b.path(".zig-cache\\asm_files\\state_manager.o"));
+    exe.addObjectFile(b.path(".zig-cache\\asm_files\\warden_asm.o"));
 
     _ = std.process.Child.run(.{
         .argv = &[_][]const u8{
@@ -106,6 +112,7 @@ pub fn build(b: *std.Build) void {
                 },
             );
             const test_exe_mod = b.createModule(.{
+
                 // `root_source_file` is the Zig "entry point" of the module. If a module
                 // only contains e.g. external object files, you can make this `null`.
                 // In this case the main source file is merely a path, however, in more
@@ -115,6 +122,8 @@ pub fn build(b: *std.Build) void {
                 .optimize = optimize,
             });
             test_exe_mod.addImport("syscall_manager", syscall_module);
+
+            test_exe_mod.addImport("sys_logger", syslogger_module);
             const test_exe = b.addExecutable(.{
                 .name = exe_name,
                 .root_module = test_exe_mod,

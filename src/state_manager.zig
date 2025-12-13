@@ -38,7 +38,9 @@ pub fn CallBuffer(func_ptr: anytype) type {
         arg_count: usize = fnArgs.len,
         arg: [fnArgs.len]usize = undefined,
 
-        pub fn call(self: *@This(), new_arg: [fnArgs.len]usize) usize {
+        const Self = @This();
+
+        pub fn call(self: *Self, new_arg: [fnArgs.len]usize) usize {
             self.arg = new_arg;
             warden_lib.global_warden.?.register_call(self) catch {
                 return 0;

@@ -3,13 +3,11 @@ const winc = @import("Windows.h.zig");
 const win = std.os.windows;
 const state_manager = @import("state_manager.zig");
 const syscall_manager_lib = @import("syscall_manager");
-const writer_lib = @import("raw_write.zig");
 
-const syscall = syscall_manager_lib.syscall;
-const syscall_manager = syscall_manager_lib.SyscallManager;
+const Syscall = syscall_manager_lib.Syscall;
+const SyscallManager = syscall_manager_lib.SyscallManager;
 const W = std.unicode.utf8ToUtf16LeStringLiteral;
 const Walloc = std.unicode.utf8ToUtf16LeAllocZ;
-const print = @import("raw_write.zig").customPrint;
 
 extern fn retry_asm(*const anyopaque) void;
 
@@ -32,7 +30,7 @@ const warder_error = error{
     InvalidNTSignature,
 };
 
-extern fn _MEH_warden_asm() callconv(.C) void;
+extern fn _MEH_warden_asm() callconv(.c) void;
 
 comptime {
     @export(&MEH_warden, .{
@@ -40,12 +38,11 @@ comptime {
         .linkage = .strong,
     });
 }
-pub fn MEH_warden(er: *win.EXCEPTION_RECORD, _: *win.CONTEXT) callconv(.c) c_long {
+pub fn MEH_warden(_: *win.EXCEPTION_RECORD, _: *win.CONTEXT) callconv(.c) c_long {
     // MASTER Exception Handler
     //0x48, 0x8D, 0x84, 0x24, 0xF0, 0x04, 0x00, 0x00, 0x48, 0x8D, 0x0C, 0x24
 
-    print("Excpetion occured: {x} - {*}\n", .{ er.ExceptionCode, er.ExceptionAddress }) catch return winc.EXCEPTION_CONTINUE_SEARCH;
-
+    // std.debug.print("Excpetion occured: {x} - {*}\n", .{ er.ExceptionCode, er.ExceptionAddress }) ;
     global_warden.?.check_exe_sections() catch {};
     retry_asm(global_warden.?.callbuff.items[global_warden.?.callbuff.items.len - 1]);
 
@@ -105,7 +102,7 @@ pub const warden = struct {
     ntdll_special_page: usize = undefined,
 
     //fully on the stack
-    syscall_manager: syscall_manager = undefined,
+    syscall_manager: SyscallManager = undefined,
 
     // callbuff is using FixedBufferAllocator
     // because reallocation could be used
@@ -128,7 +125,7 @@ pub const warden = struct {
         self.page_map.deinit();
         var mod_iterator = self.mod_map.iterator();
         while (mod_iterator.next()) |entry| {
-            entry.value_ptr.pages.deinit();
+            entry.value_ptr.pages.deinit(self.allocator);
             self.allocator.free(entry.key_ptr.*);
         }
         self.mod_map.deinit();
@@ -144,24 +141,21 @@ pub const warden = struct {
         _ = try self.enumerate_memory();
         _ = try self.enumerate_modules();
         _ = try self.load_initial_exe();
-        self.syscall_manager = syscall_manager{};
+        self.syscall_manager = SyscallManager.init();
         const ntdll = win.kernel32.GetModuleHandleW(W("ntdll.dll")).?;
 
         const ntpvm: [*]u8 = @ptrCast(win.kernel32.GetProcAddress(ntdll, "ZwProtectVirtualMemory").?);
-        const ntvmp_syscall = try syscall.fetch(ntpvm);
         const ntop: [*]u8 = @ptrCast(win.kernel32.GetProcAddress(ntdll, "NtOpenProcess").?);
-        const ntop_syscall = try syscall.fetch(ntop);
         const ntwf: [*]u8 = @ptrCast(win.kernel32.GetProcAddress(ntdll, "NtWriteFile").?);
-        const ntwf_syscall = try syscall.fetch(ntwf);
 
-        self.syscall_manager.addNTVPM(ntvmp_syscall);
-        self.syscall_manager.addNOP(ntop_syscall);
-        self.syscall_manager.addNWF(ntwf_syscall);
+        try self.syscall_manager.addFromStub(.NtVirtualProtectMemory, ntpvm);
+        try self.syscall_manager.addFromStub(.NtOpenProcess, ntop);
+        try self.syscall_manager.addFromStub(.NtWriteFile, ntwf);
 
         try self.patch_ntdll();
         self._fba = std.heap.FixedBufferAllocator.init(&self._fba_buf);
         self.raw_allocator = self._fba.allocator();
-        self.callbuff = std.ArrayList(*const anyopaque).init(self.raw_allocator);
+        self.callbuff = try std.ArrayList(*const anyopaque).initCapacity(self.raw_allocator, 1);
 
         self.get_current_mod();
 
@@ -256,7 +250,7 @@ pub const warden = struct {
             var moduleInfo = ModuleInfo{
                 .baseAddr = baseAddr,
                 .size = modSize,
-                .pages = std.ArrayList(*PageInfo).init(self.allocator),
+                .pages = try std.ArrayList(*PageInfo).initCapacity(self.allocator, 1),
             };
 
             // Iterate over all pages from the pages_map and add those that fall within this module.
@@ -264,7 +258,7 @@ pub const warden = struct {
             while (it.next()) |entry| {
                 const pageAddr = entry.key_ptr.*;
                 if (pageAddr >= baseAddr and pageAddr < baseAddr + modSize) {
-                    try moduleInfo.pages.append(entry.value_ptr.*);
+                    try moduleInfo.pages.append(self.allocator, entry.value_ptr.*);
                 }
             }
 
@@ -324,7 +318,7 @@ pub const warden = struct {
             return warder_error.InvalidBuffer;
         }
         // Cast the beginning of the buffer as a DOS header.
-        const dosHeader: *winc.IMAGE_DOS_HEADER = @alignCast(@ptrCast(buffer.ptr));
+        const dosHeader: *winc.IMAGE_DOS_HEADER = @ptrCast(@alignCast(buffer.ptr));
         if (dosHeader.e_magic != winc.IMAGE_DOS_SIGNATURE) {
             return warder_error.InvalidDOSHeader;
         }
@@ -333,7 +327,7 @@ pub const warden = struct {
             return warder_error.InvalidBuffer;
         }
         // Obtain a pointer to the NT headers.
-        const nt_headers: *winc.IMAGE_NT_HEADERS = @alignCast(@ptrCast(buffer.ptr + nt_header_offset));
+        const nt_headers: *winc.IMAGE_NT_HEADERS = @ptrCast(@alignCast(buffer.ptr + nt_header_offset));
         if (nt_headers.Signature != winc.IMAGE_NT_SIGNATURE) {
             return warder_error.InvalidNTSignature;
         }
@@ -343,7 +337,7 @@ pub const warden = struct {
             nt_headers.OptionalHeader.DataDirectory[winc.IMAGE_DIRECTORY_ENTRY_BASERELOC];
         const optHeaderSize = nt_headers.FileHeader.SizeOfOptionalHeader;
         const sections_ptr: *align(1) winc.IMAGE_SECTION_HEADER =
-            (@ptrCast((@as([*]u8, @constCast(@ptrCast(&nt_headers.OptionalHeader)))) + optHeaderSize));
+            (@ptrCast((@as([*]u8, @ptrCast(@constCast(&nt_headers.OptionalHeader)))) + optHeaderSize));
         // Create a slice over the section headers.
         const numSections = nt_headers.FileHeader.NumberOfSections;
         const sections: [*]align(1) winc.IMAGE_SECTION_HEADER = @ptrCast(sections_ptr);
@@ -351,7 +345,7 @@ pub const warden = struct {
         self.sections = try self.allocator.alloc(MappedMockSection, numSections);
 
         for (sections[0..numSections], 0..) |section, i| {
-            const cast_name = @as([*:0]u8, @constCast(@ptrCast(&sections[i].Name)));
+            const cast_name = @as([*:0]u8, @ptrCast(@constCast(&sections[i].Name)));
             const section_name_trimmed = cast_name[0..std.mem.len(cast_name)];
             self.sections[i] =
                 MappedMockSection{
@@ -476,7 +470,7 @@ pub const warden = struct {
         if (@sizeOf(winc.IMAGE_DOS_HEADER) > 0 and base_addr_ptr == null) {
             return error.InvalidModuleBase;
         }
-        const dos_header: *const winc.IMAGE_DOS_HEADER = @alignCast(@ptrCast(base_addr_ptr.?));
+        const dos_header: *const winc.IMAGE_DOS_HEADER = @ptrCast(@alignCast(base_addr_ptr.?));
         if (dos_header.e_magic != winc.IMAGE_DOS_SIGNATURE) {
             return error.InvalidDOSHeader;
         }
@@ -541,7 +535,7 @@ pub const warden = struct {
     }
 
     pub fn register_call(self: *Self, callbuf: *const anyopaque) !void {
-        try self.callbuff.append(callbuf);
+        try self.callbuff.append(self.allocator, callbuf);
         //protection logic
 
     }
@@ -572,13 +566,13 @@ pub const warden = struct {
         // );
         var old_access: usize = 0;
         var numberOfByteToProtect: usize = 0x1000;
-        const ret_val = try self.syscall_manager.NtVirtualProtectMemory(
+        const ret_val = try self.syscall_manager.invoke(.NtVirtualProtectMemory, .{
             0xFFFFFFFFFFFFFFFF,
             &page.baseAddr,
             &numberOfByteToProtect,
             protection,
             &old_access,
-        );
+        });
         page.access = protection;
         if (NT_SUCCESS(@intCast(ret_val))) {
             return true;
@@ -669,29 +663,6 @@ pub const warden = struct {
         std.mem.copyForwards(u8, ntkued[0..0x11], self.ntdll_buffer[0..0x11]);
         _ = try self.change_page_protection(page, win.PAGE_EXECUTE_READ);
     }
-
-    pub fn raw_printer(self: *Self, bytes: []const u8) void {
-        //  mov     rax, gs:60h
-        //  mov     rcx, [rax+20h]
-        //  mov     rdi, [rcx+28h]
-        const stdout = asm volatile (".byte 0x65, 0x48, 0x8B, 0x04, 0x25, 0x60, 0x00, 0x00, 0x00, 0x48, 0x8B, 0x48, 0x20, 0x48, 0x8B, 0x79, 0x28\n"
-            : [ret] "={rdi}" (-> usize),
-            :
-            : "rax", "rcx", "rdi"
-        );
-        var io_block: win.IO_STATUS_BLOCK = undefined;
-        _ = self.syscall_manager.NtWriteFile(
-            stdout,
-            0,
-            0,
-            0,
-            &io_block,
-            bytes.ptr,
-            bytes.len,
-            0,
-            0,
-        ) catch return;
-    }
 };
 pub fn stripExecutionProtection(protect: u32) u32 {
     // Assume the lower 8 bits represent the basic protection type.
@@ -733,8 +704,8 @@ fn InitializeObjectAttributes(
     attrs: *OBJECT_ATTRIBUTES,
     name: ?*win.UNICODE_STRING,
     attributes: u32,
-    rootDir: ?*void,
-    securityDescriptor: ?*void,
+    rootDir: ?*anyopaque,
+    securityDescriptor: ?*anyopaque,
 ) void {
     attrs.Length = @sizeOf(win.OBJECT_ATTRIBUTES);
     attrs.RootDirectory = rootDir;
@@ -764,6 +735,5 @@ fn GetCurrentProcessId() usize {
     return asm volatile (".byte 0x65, 0x48, 0x8B, 0x04, 0x25, 0x30, 0x00, 0x00, 0x00, 0x8B, 0x40, 0x40 \n"
         : [ret] "={rax}" (-> usize),
         :
-        : "rax"
-    );
+        : .{ .rax = true });
 }

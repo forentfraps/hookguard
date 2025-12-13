@@ -1,20 +1,20 @@
 const std = @import("std");
 const warden_lib = @import("warden.zig");
-const print = @import("raw_write.zig").customPrint;
 const state_manager = @import("state_manager.zig");
 
 const CallBuffer = state_manager.CallBuffer;
 
 var test_function2_counter: u32 = 0;
-pub fn test_function2(a: u32, b: u32, c: u32, d: u32, e: u32) callconv(.C) void {
+pub fn test_function2(a: u32, b: u32, c: u32, d: u32, e: u32, f: u32) callconv(.c) void {
     if (test_function2_counter != 0) {
         _ = warden_lib.global_warden.?.unprotect_global() catch return;
     }
     test_function2_counter = 1;
-    std.debug.print("function2 - {d} {d} {d} {d} {d}\n", .{ a, b, c, d, e });
+    std.debug.print("function2 - {d} {d} {d} {d} {d} {d}\n", .{ a, b, c, d, e, f });
 }
 
 pub fn main() !void {
+    std.debug.print("\n---Protection TEST----\n", .{});
     var gpa = std.heap.DebugAllocator(.{}){};
     const allocator = gpa.allocator();
 
@@ -23,11 +23,9 @@ pub fn main() !void {
     var test_f2 = CallBuffer(&test_function2){};
     _ = try w.protect_global();
 
-    try print("test print {d}\n", .{5});
-
     // _ = try w.unprotect_global();
 
-    _ = test_f2.call(.{ 1, 2, 3, 4, 5 });
+    _ = test_f2.call(.{ 1, 2, 3, 4, 5, 6 });
     try w.deinit();
 
     std.debug.print("Sucess - protection\n", .{});
