@@ -1,6 +1,7 @@
 const std = @import("std");
-const warden_lib = @import("warden.zig");
-const state_manager = @import("state_manager.zig");
+const hookguard = @import("hookguard");
+const warden_lib = hookguard.WardenLib;
+const state_manager = hookguard.StateManagerLib;
 
 const CallBuffer = state_manager.CallBuffer;
 

@@ -1,139 +1,121 @@
 const std = @import("std");
 
-// Although this function looks imperative, note that its job is to
-// declaratively construct a build graph that will be executed by an external
-// runner.
+// Declaratively construct a build graph executed by Zig's build runner.
 pub fn build(b: *std.Build) void {
     const optimize = b.standardOptimizeOption(.{});
     const target = b.standardTargetOptions(.{});
+
     const syscall_dep = b.dependency("syscall_manager", .{});
     const syscall_module = syscall_dep.module("syscall_manager");
 
     const syslogger_dep = b.dependency("sys_logger", .{});
     const syslogger_module = syslogger_dep.module("sys_logger");
 
-    // Standard optimization options allow the person running `zig build` to select
-    // between Debug, ReleaseSafe, ReleaseFast, and ReleaseSmall. Here we do not
-    // set a preferred release mode, allowing the user to decide how to optimize.
+    // Allow overriding NASM from the command line:
+    //   zig build -Dnasm="C:\\path\\to\\nasm.exe"
+    const nasm_bin = b.option([]const u8, "nasm", "Path to nasm executable") orelse "nasm";
+
+    // ---- NASM steps (these are real build steps now) ----
+    // warden.asm -> warden_asm.o
+    const warden_asm_cmd = b.addSystemCommand(&.{ nasm_bin, "-f", "win64" });
+    warden_asm_cmd.addFileArg(b.path("src/warden.asm"));
+    warden_asm_cmd.addArg("-o");
+    const warden_obj = warden_asm_cmd.addOutputFileArg("warden_asm.o");
+
+    // state_manager.asm -> state_manager.o
+    const state_asm_cmd = b.addSystemCommand(&.{ nasm_bin, "-f", "win64" });
+    state_asm_cmd.addFileArg(b.path("src/state_manager.asm"));
+    state_asm_cmd.addArg("-o");
+    const state_obj = state_asm_cmd.addOutputFileArg("state_manager.o");
+
+    // Optional: a named step you can run explicitly: `zig build asm`
+    const asm_step = b.step("asm", "Assemble NASM sources");
+    asm_step.dependOn(&warden_asm_cmd.step);
+    asm_step.dependOn(&state_asm_cmd.step);
+
+    // ---- Main executable ----
     const exe_mod = b.createModule(.{
-        // `root_source_file` is the Zig "entry point" of the module. If a module
-        // only contains e.g. external object files, you can make this `null`.
-        // In this case the main source file is merely a path, however, in more
-        // complicated build scripts, this could be a generated file.
         .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const hookguard_module = b.addModule("hookguard", .{
+        .root_source_file = b.path("src/root.zig"),
         .target = target,
         .optimize = optimize,
     });
     exe_mod.addImport("syscall_manager", syscall_module);
     exe_mod.addImport("sys_logger", syslogger_module);
+
+    hookguard_module.addImport("syscall_manager", syscall_module);
+    hookguard_module.addImport("sys_logger", syslogger_module);
+
     const exe = b.addExecutable(.{
         .name = "hookguard",
         .root_module = exe_mod,
     });
-    exe.addObjectFile(b.path(".zig-cache\\asm_files\\state_manager.o"));
-    exe.addObjectFile(b.path(".zig-cache\\asm_files\\warden_asm.o"));
 
-    _ = std.process.Child.run(.{
-        .argv = &[_][]const u8{
-            "nasm",
-            "-f",
-            "win64",
-            "src\\warden.asm",
-            "-o",
-            ".zig-cache\\asm_files\\warden_asm.o",
-        },
-        .allocator = std.heap.page_allocator,
-    }) catch |e| {
-        std.debug.print("Asm build failed -> {}\n", .{e});
-        return;
-    };
-    _ = std.process.Child.run(.{
-        .argv = &[_][]const u8{
-            "nasm",
-            "-f",
-            "win64",
-            "src\\state_manager.asm",
-            "-o",
-            ".zig-cache\\asm_files\\state_manager.o",
-        },
-        .allocator = std.heap.page_allocator,
-    }) catch |e| {
-        std.debug.print("Asm build failed -> {}\n", .{e});
-        return;
-    };
+    // Wire generated objects into the link step (these LazyPaths carry deps)
+    exe.addObjectFile(state_obj);
+    exe.addObjectFile(warden_obj);
 
-    // This declares intent for the executable to be installed into the
-    // standard location when the user invokes the "install" step (the default
-    // step when running `zig build`).
+    // If you want to be explicit, keep this (harmless; ensures ordering):
+    exe.step.dependOn(asm_step);
+
     b.installArtifact(exe);
 
-    // This *creates* a Run step in the build graph, to be executed when another
-    // step is evaluated that depends on it. The next line below will establish
-    // such a dependency.
+    // ---- Run step ----
     const run_cmd = b.addRunArtifact(exe);
-
-    // By making the run step depend on the install step, it will be run from the
-    // installation directory rather than directly from within the cache directory.
-    // This is not necessary, however, if the application depends on other installed
-    // files, this ensures they will be present and in the expected location.
     run_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| run_cmd.addArgs(args);
 
-    // This allows the user to pass arguments to the application in the build
-    // command itself, like this: `zig build run -- arg1 arg2 etc`
-    if (b.args) |args| {
-        run_cmd.addArgs(args);
-    }
-
-    // This creates a build step. It will be visible in the `zig build --help` menu,
-    // and can be selected like this: `zig build run`
-    // This will evaluate the `run` step rather than the default, which is "install".
     const run_step = b.step("run", "Run the app");
     run_step.dependOn(&run_cmd.step);
 
-    const test_step = b.step("test", "Run all tests in ./tests");
+    // ---- Test discovery + run ----
+    const test_step = b.step("test", "Run all tests in ./src matching *test.zig");
 
     const tests_dir = std.fs.cwd().openDir("src", .{ .iterate = true }) catch {
         @panic("NO src DIR");
     };
     var it = tests_dir.iterate();
 
-    while (it.next() catch {
-        @panic("NO TESTS");
-    }) |entry| {
+    while (it.next() catch @panic("NO TESTS")) |entry| {
         if (std.mem.endsWith(u8, entry.name, "test.zig")) {
             const exe_name = entry.name[0 .. entry.name.len - 4];
-            const source_path = b.path(
-                std.mem.concat(
-                    std.heap.page_allocator,
-                    u8,
-                    &[_][]const u8{ "src/", entry.name },
-                ) catch {
-                    @panic("OOM");
-                },
-            );
-            const test_exe_mod = b.createModule(.{
 
-                // `root_source_file` is the Zig "entry point" of the module. If a module
-                // only contains e.g. external object files, you can make this `null`.
-                // In this case the main source file is merely a path, however, in more
-                // complicated build scripts, this could be a generated file.
-                .root_source_file = source_path,
+            const source_rel = std.mem.concat(
+                std.heap.page_allocator,
+                u8,
+                &[_][]const u8{ "src/", entry.name },
+            ) catch @panic("OOM");
+
+            const test_exe_mod = b.createModule(.{
+                .root_source_file = b.path(source_rel),
                 .target = target,
                 .optimize = optimize,
             });
             test_exe_mod.addImport("syscall_manager", syscall_module);
-
             test_exe_mod.addImport("sys_logger", syslogger_module);
+            test_exe_mod.addImport("hookguard", hookguard_module);
+
             const test_exe = b.addExecutable(.{
                 .name = exe_name,
                 .root_module = test_exe_mod,
             });
-            // test_exe.addObjectFile(b.path(".zig-cache\\asm_files\\syscall_wrapper.o"));
-            test_exe.addObjectFile(b.path(".zig-cache\\asm_files\\state_manager.o"));
-            test_exe.addObjectFile(b.path(".zig-cache\\asm_files\\warden_asm.o"));
-            const test_exe_run_step = b.addRunArtifact(test_exe);
-            test_exe_run_step.step.dependOn(&test_exe.step);
-            test_step.dependOn(&test_exe_run_step.step);
+
+            // Reuse the same generated object outputs; the deps are preserved.
+            test_exe.addObjectFile(state_obj);
+            test_exe.addObjectFile(warden_obj);
+
+            // Explicitly depend on assembly step (optional but clear)
+            test_exe.step.dependOn(asm_step);
+
+            const test_run = b.addRunArtifact(test_exe);
+            test_run.step.dependOn(&test_exe.step);
+
+            test_step.dependOn(&test_run.step);
         }
     }
 }
